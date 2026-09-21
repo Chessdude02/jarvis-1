@@ -87,21 +87,59 @@ class PolicyEngine:
     # -- public API -----------------------------------------------------
 
     def evaluate(self, request: ActionRequest) -> PolicyDecision:
-        decision = self._evaluate(request)
-        if self.audit_sink is not None:
-            self.audit_sink.record(
-                event_type="policy_decision",
-                tool=request.tool_name,
-                args=request.args,
-                command=request.command,
-                paths=request.paths,
-                decision=decision.decision.value,
-                category=decision.category.value,
-                risk=decision.risk.value,
-                reasons=decision.reasons,
+        """Never raises. Per the fail-closed invariant ("policy engine
+        unavailable" / "audit system unavailable" -> DO NOT EXECUTE): if
+        anything in the decision or audit path breaks, the answer is an
+        explicit DENY with a clear reason, not an exception a caller might
+        mishandle or a decision that silently goes unaudited. This makes
+        fail-closed a guarantee of this method itself, not something that
+        happens to work only because whatever calls evaluate() has its own
+        try/except around it.
+        """
+        try:
+            decision = self._evaluate(request)
+        except Exception as exc:
+            decision = PolicyDecision(
+                Decision.DENY, PermissionLevel.DENY, RiskLevel.CRITICAL,
+                [f"Security policy evaluation failed ({type(exc).__name__}: {exc}); failing closed."],
+                absolute=True,
             )
+
+        if self.audit_sink is not None:
+            try:
+                self.audit_sink.record(
+                    event_type="policy_decision",
+                    tool=request.tool_name,
+                    args=request.args,
+                    command=request.command,
+                    paths=request.paths,
+                    decision=decision.decision.value,
+                    category=decision.category.value,
+                    risk=decision.risk.value,
+                    reasons=decision.reasons,
+                )
+            except Exception as exc:
+                # An otherwise-ALLOW decision that can't be written to the
+                # audit log must not go through un-audited -- an action
+                # nobody can prove happened is treated the same as one
+                # that was never authorized.
+                decision = PolicyDecision(
+                    Decision.DENY, PermissionLevel.DENY, RiskLevel.CRITICAL,
+                    [f"Audit log unavailable ({type(exc).__name__}: {exc}); refusing to proceed unaudited."],
+                    absolute=True,
+                )
+
         if self.security_monitor is not None:
-            self.security_monitor.observe(request, decision)
+            try:
+                self.security_monitor.observe(request, decision)
+            except Exception:
+                # The behavioral monitor is a detective, defense-in-depth
+                # layer on top of the decision above, not the authority
+                # for it -- unlike the policy engine and audit log, its
+                # failure doesn't retroactively invalidate an already-
+                # computed, already-audited decision.
+                pass
+
         return decision
 
     # -- internals --------------------------------------------------------

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from jarvis.security.permissions import ActionRequest, Decision, PermissionLevel
+from jarvis.security.policy_engine import PolicyEngine
 
 
 def test_absolute_deny_tool_blocked(policy_engine):
@@ -99,6 +100,59 @@ def test_modify_grant_allows_repeat_action(policy_engine, settings):
     grants.granted.add("execute_command:pip:proj")
     second = policy_engine.evaluate(req)
     assert second.decision == Decision.ALLOW
+
+
+def test_evaluate_never_raises_and_fails_closed_when_audit_log_fails(settings, registry):
+    # Explicit, intentional version of spec's "audit system unavailable ->
+    # DO NOT EXECUTE" -- an ALLOW-worthy request must still come back as
+    # DENY if it can't be recorded (a broken audit sink stands in for disk
+    # full / DB locked / corrupted file).
+    class BrokenAuditSink:
+        def record(self, **kwargs):
+            raise OSError("disk full (simulated)")
+
+    engine = PolicyEngine(settings, registry.policy_specs(), audit_sink=BrokenAuditSink())
+    decision = engine.evaluate(ActionRequest(tool_name="get_memory_usage", args={}))  # normally a trivial ALLOW
+    assert decision.decision == Decision.DENY
+    assert "audit" in " ".join(decision.reasons).lower()
+
+
+def test_evaluate_never_raises_and_fails_closed_on_internal_bug(settings, registry):
+    # Simulates "an unexpected bug in a policy check" rather than a
+    # specific known failure mode -- evaluate() must still return a DENY,
+    # never propagate the exception to the caller.
+    engine = PolicyEngine(settings, registry.policy_specs())
+
+    def broken_resolve_category(request):
+        raise RuntimeError("simulated internal policy engine bug")
+
+    engine._resolve_category = broken_resolve_category
+    decision = engine.evaluate(ActionRequest(tool_name="get_memory_usage", args={}))
+    assert decision.decision == Decision.DENY
+    assert "failing closed" in " ".join(decision.reasons).lower()
+
+
+def test_evaluate_still_allows_normally_when_audit_sink_works(policy_engine):
+    # Sanity check that the fail-closed wrapping above didn't break the
+    # ordinary, everything-working path.
+    decision = policy_engine.evaluate(ActionRequest(tool_name="get_memory_usage", args={}))
+    assert decision.decision == Decision.ALLOW
+
+
+def test_security_monitor_failure_does_not_flip_an_already_audited_decision(settings, registry, audit_log):
+    # Unlike the audit log, the behavioral monitor is a secondary/detective
+    # layer -- its own failure must not retroactively deny an action that
+    # was already correctly decided and successfully audited.
+    class BrokenMonitor:
+        def check_lockout(self, request):
+            return None
+
+        def observe(self, request, decision):
+            raise RuntimeError("simulated monitor bug")
+
+    engine = PolicyEngine(settings, registry.policy_specs(), audit_sink=audit_log, security_monitor=BrokenMonitor())
+    decision = engine.evaluate(ActionRequest(tool_name="get_memory_usage", args={}))
+    assert decision.decision == Decision.ALLOW
 
 
 def test_none_path_entry_does_not_crash_evaluate(policy_engine):
