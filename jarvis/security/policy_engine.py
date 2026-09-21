@@ -75,6 +75,7 @@ class PolicyEngine:
         security_monitor: Optional[SecurityMonitor] = None,
         kill_switch=None,
         lockdown_manager: Optional[LockdownManager] = None,
+        rate_limiter=None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry or {}
@@ -82,6 +83,7 @@ class PolicyEngine:
         self.audit_sink = audit_sink
         self.security_monitor = security_monitor
         self.kill_switch = kill_switch
+        self.rate_limiter = rate_limiter
         self.lockdown_manager = lockdown_manager
 
     # -- public API -----------------------------------------------------
@@ -174,6 +176,16 @@ class PolicyEngine:
                     "Only read-only diagnostics are available. Open the Security Center to review "
                     "what triggered this and exit lockdown explicitly if you want to resume normal use."
                 )
+
+        # -0.25. Rate limiting: bounds activity ACROSS turns, independent of
+        # the orchestrator's own per-turn caps (max_commands_per_request,
+        # the 6-round-trip bound). A burst of separate short turns, each
+        # individually within those per-turn caps, would otherwise sail
+        # through uncapped.
+        if self.rate_limiter is not None:
+            allowed, reason = self.rate_limiter.check_and_record("tool_execution")
+            if not allowed:
+                return _deny(reason)
 
         # 0. Behavioral lockout: independent of what this specific request
         # would otherwise resolve to. Checked first and fails closed --

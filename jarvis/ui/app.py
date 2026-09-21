@@ -18,6 +18,7 @@ from jarvis.core.orchestrator import EntityState, Orchestrator
 from jarvis.llm.ollama_client import OllamaClient
 from jarvis.security.audit import AuditLog
 from jarvis.security.kill_switch import KillSwitch
+from jarvis.security.rate_limiter import RateLimiter
 from jarvis.security.lockdown import LockdownManager
 from jarvis.security.monitor import SecurityMonitor
 from jarvis.security.permissions import ApprovalScope
@@ -99,13 +100,14 @@ class JarvisApp:
         self.memory = Memory(self.settings.memory_db_path)
         self.lockdown_manager = LockdownManager(audit_sink=self.audit_log)
         self.security_monitor = SecurityMonitor(audit_sink=self.audit_log, lockdown_manager=self.lockdown_manager)
+        self.rate_limiter = RateLimiter(audit_sink=self.audit_log)
         self.sandbox = Sandbox(self.settings)
         self.kill_switch = KillSwitch(self.sandbox, audit_sink=self.audit_log, security_monitor=self.security_monitor)
         self.policy_engine = PolicyEngine(
             self.settings, self.registry.policy_specs(),
             grant_store=self.memory, audit_sink=self.audit_log,
             security_monitor=self.security_monitor, kill_switch=self.kill_switch,
-            lockdown_manager=self.lockdown_manager,
+            lockdown_manager=self.lockdown_manager, rate_limiter=self.rate_limiter,
         )
         self.llm_client = OllamaClient(self.settings)
 
@@ -123,6 +125,7 @@ class JarvisApp:
             self.settings, self.registry, self.policy_engine, self.sandbox,
             self.audit_log, self.memory, self.llm_client,
             approval_callback=self.approval_bridge.request_approval,
+            rate_limiter=self.rate_limiter,
         )
         self.orchestrator.refresh_project_index()
         # Level 2 (stop_all_actions) also needs the orchestrator's reasoning

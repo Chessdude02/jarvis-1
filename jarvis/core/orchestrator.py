@@ -66,6 +66,7 @@ class Orchestrator:
         memory,
         llm_client: OllamaClient | None = None,
         approval_callback: ApprovalCallback | None = None,
+        rate_limiter=None,
     ) -> None:
         self.settings = settings
         self.registry = registry
@@ -75,6 +76,7 @@ class Orchestrator:
         self.memory = memory
         self.llm = llm_client or OllamaClient(settings)
         self.approval_callback = approval_callback or _default_deny_callback
+        self.rate_limiter = rate_limiter
         self._project_index: list | None = None
         self._stop_event = threading.Event()
 
@@ -112,6 +114,17 @@ class Orchestrator:
 
     def handle_message(self, user_text: str) -> Iterator[OrchestratorEvent]:
         self.reset_stop()
+
+        if self.rate_limiter is not None:
+            allowed, reason = self.rate_limiter.check_and_record("user_message")
+            if not allowed:
+                # Checked before even touching memory or the LLM -- a
+                # rate-limited turn costs nothing beyond this check, not an
+                # LLM round-trip.
+                yield OrchestratorEvent("error", reason)
+                yield OrchestratorEvent("state", EntityState.ERROR)
+                return
+
         if self.memory:
             self.memory.add_message("user", user_text)
 
