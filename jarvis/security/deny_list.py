@@ -97,6 +97,23 @@ DENY_COMMAND_PATTERNS: tuple[re.Pattern, ...] = tuple(re.compile(p, re.IGNORECAS
 ))
 
 
+# PowerShell (backtick) and cmd.exe (caret) both support a literal line-
+# continuation character immediately before a newline, which is NOT a
+# whitespace character itself -- so a pattern written as `\bnet\s+stop\s+
+# windefend\b` does not match "net stop`\nwindefend" or "net stop^\r\n
+# windefend" even though that is functionally the exact same command a
+# real shell would run as one line. Found by testing evasions against the
+# Defender-disable and curl|bash patterns specifically, but this collapses
+# the continuation before ANY pattern match runs (deny list, destructive
+# patterns, chain-separator detection), closing the technique for all of
+# them at once rather than patching each affected regex individually.
+_LINE_CONTINUATION = re.compile(r"[`^]\s*\r?\n")
+
+
+def normalize_command(command: str) -> str:
+    return _LINE_CONTINUATION.sub(" ", command)
+
+
 def denied_tool(tool_name: str) -> str | None:
     if tool_name in ABSOLUTE_DENY_TOOLS:
         return f"'{tool_name}' is on the absolute deny list and is never executable."
@@ -114,8 +131,9 @@ def denied_path(path: str) -> str | None:
 
 
 def denied_command(command: str) -> str | None:
+    normalized = normalize_command(command)
     for pattern in DENY_COMMAND_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(normalized):
             return f"Command matches a denied security-control pattern ({pattern.pattern})."
     return None
 

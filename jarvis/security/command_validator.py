@@ -13,7 +13,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from jarvis.security.deny_list import denied_command
+from jarvis.security.deny_list import denied_command, normalize_command
 from jarvis.security.permissions import PermissionLevel, Reversibility, RiskLevel
 
 
@@ -101,6 +101,14 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
     stripped = command.strip()
     if not stripped:
         return CommandClassification(PermissionLevel.DENY, RiskLevel.CRITICAL, ["Empty command."], denied=True)
+
+    # Collapse PowerShell (`) / cmd.exe (^) line continuations BEFORE any
+    # pattern match runs, not just the deny-list one -- found by testing:
+    # "net stop^\nwindefend" is one logical command to a real shell, but
+    # \s+ in a pattern like \bnet\s+stop\s+windefend\b does not match across
+    # a literal ^ character, so leaving it unnormalized here too would let
+    # the same technique dodge the destructive-pattern/prefix logic below.
+    stripped = normalize_command(stripped)
 
     deny_reason = denied_command(stripped)
     if deny_reason:

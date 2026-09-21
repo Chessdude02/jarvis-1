@@ -93,13 +93,37 @@ class OllamaClient:
                 f"Is Ollama running ('ollama serve') and is '{self.model}' pulled?"
             ) from exc
 
-        body = resp.json()
-        message = body.get("message", {})
-        tool_calls = []
-        for i, tc in enumerate(message.get("tool_calls", []) or []):
-            fn = tc.get("function", {})
-            tool_calls.append(ToolCall(id=str(tc.get("id", i)), name=fn.get("name", ""), arguments=_normalize_arguments(fn.get("arguments"))))
-        return ChatResponse(content=message.get("content", "") or "", tool_calls=tool_calls, raw=body)
+        # A 200 OK response doesn't guarantee a well-shaped body -- found by
+        # testing: something other than Ollama answering on the configured
+        # port (or Ollama itself misbehaving) can return non-JSON, a JSON
+        # array/string instead of an object, or a "message" field that
+        # isn't itself an object, none of which requests.RequestException
+        # covers. Any of those must become the same OllamaUnavailableError
+        # the orchestrator already knows how to report cleanly, not an
+        # uncaught exception escaping the whole turn.
+        try:
+            body = resp.json()
+            if not isinstance(body, dict):
+                raise ValueError(f"expected a JSON object, got {type(body).__name__}")
+            message = body.get("message") or {}
+            if not isinstance(message, dict):
+                raise ValueError(f"'message' field was {type(message).__name__}, expected an object")
+            tool_calls = []
+            for i, tc in enumerate(message.get("tool_calls", []) or []):
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                if not isinstance(fn, dict):
+                    fn = {}
+                tool_calls.append(ToolCall(id=str(tc.get("id", i)), name=fn.get("name", ""), arguments=_normalize_arguments(fn.get("arguments"))))
+            content = message.get("content", "") or ""
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise OllamaUnavailableError(
+                f"Local Ollama server at {self.host} returned an unexpected response shape: {exc}. "
+                f"Something other than Ollama may be answering on that port."
+            ) from exc
+
+        return ChatResponse(content=content if isinstance(content, str) else str(content), tool_calls=tool_calls, raw=body)
 
     def chat_stream(self, messages: list[dict]) -> Iterator[str]:
         """Streams plain-text token chunks for a final (no-tools) answer, so
