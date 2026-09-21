@@ -58,9 +58,16 @@ class ExecuteCommandTool(Tool):
 
     def build_request(self, args):
         req = super().build_request(args)
-        req.command = args.get("command", "")
-        req.cwd = args.get("cwd", "")
-        req.paths = [args.get("cwd", "")]
+        # Coerce to str explicitly rather than args.get("command", "") --
+        # that default only applies when the key is ABSENT; a model
+        # returning {"command": null} or {"command": 123} (found by
+        # fuzzing) leaves the raw non-string value in place, which then
+        # crashes .split() below.
+        raw_command = args.get("command")
+        raw_cwd = args.get("cwd")
+        req.command = raw_command if isinstance(raw_command, str) else ""
+        req.cwd = raw_cwd if isinstance(raw_cwd, str) else ""
+        req.paths = [req.cwd]
         req.description = f"Run `{req.command}` in {req.cwd}"
         req.grant_key = f"execute_command:{req.command.split()[0] if req.command else ''}:{req.cwd}"
         return req

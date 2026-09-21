@@ -101,6 +101,30 @@ def test_modify_grant_allows_repeat_action(policy_engine, settings):
     assert second.decision == Decision.ALLOW
 
 
+def test_none_path_entry_does_not_crash_evaluate(policy_engine):
+    # Found by fuzzing: a non-string entry in request.paths (a model
+    # returning null/a number for a path argument) crashed inside
+    # _check_self_protection's `marker in raw` check.
+    decision = policy_engine.evaluate(ActionRequest(tool_name="list_directory", paths=[None]))
+    assert decision is not None  # must not raise
+
+
+def test_non_string_path_entries_do_not_crash_evaluate(policy_engine):
+    for bad_path in (12345, ["a", "list"], {"n": "d"}, 3.14, True):
+        decision = policy_engine.evaluate(ActionRequest(tool_name="list_directory", paths=[bad_path]))
+        assert decision is not None
+
+
+def test_non_string_cwd_does_not_crash_evaluate(policy_engine):
+    decision = policy_engine.evaluate(ActionRequest(tool_name="execute_command", command="git status", cwd=12345))
+    assert decision is not None
+
+
+def test_non_string_command_does_not_crash_evaluate(policy_engine):
+    decision = policy_engine.evaluate(ActionRequest(tool_name="execute_command", command=12345, cwd="/tmp"))
+    assert decision is not None
+
+
 def test_security_monitor_lockout_blocks_policy_engine_end_to_end(settings, registry, audit_log):
     from jarvis.security.monitor import SecurityMonitor
     from jarvis.security.policy_engine import PolicyEngine

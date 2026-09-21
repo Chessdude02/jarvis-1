@@ -104,6 +104,21 @@ class PolicyEngine:
     # -- internals --------------------------------------------------------
 
     def _evaluate(self, request: ActionRequest) -> PolicyDecision:
+        # -1. Type sanitation. request.paths/cwd/command are typed as str,
+        # but nothing upstream of this point actually enforces that -- a
+        # malformed tool call (a model returning null, a number, or a list
+        # for a path-shaped argument, found by fuzzing) can put a non-string
+        # value into any of these before build_request's default `or ""`
+        # ever runs (e.g. args.get("path", "") returns None, not "", when
+        # the key IS present with value None). Every downstream check in
+        # this method assumes strings; coercing here once means every one
+        # of them can stay simple instead of each needing its own guard.
+        request.paths = [p for p in request.paths if isinstance(p, str) and p]
+        if not isinstance(request.cwd, str):
+            request.cwd = None
+        if not isinstance(request.command, str):
+            request.command = None
+
         # 0. Behavioral lockout: independent of what this specific request
         # would otherwise resolve to. Checked first and fails closed --
         # a tool under lockout refuses everything, including what would
@@ -174,7 +189,15 @@ class PolicyEngine:
         if request.cwd:
             candidates.append(request.cwd)
         for raw in candidates:
-            normalized = str(Path(raw)) if raw else ""
+            # request.paths/cwd are typed as strings, but a malformed tool
+            # call (a model returning null/a number/a list for a path
+            # argument -- found by fuzzing) can put a non-string value here
+            # before this ever reaches a type-checked boundary. Treat
+            # anything that isn't a string as simply not matching, rather
+            # than letting `in` raise on a non-iterable/wrong-type operand.
+            if not isinstance(raw, str) or not raw:
+                continue
+            normalized = str(Path(raw))
             for marker in _SELF_PROTECTED_SUBSTRINGS:
                 if marker in normalized or marker in raw:
                     return "Action would touch JARVIS's own security/config/audit files; self-modification is never allowed."

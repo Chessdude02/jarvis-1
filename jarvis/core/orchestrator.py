@@ -183,9 +183,25 @@ class Orchestrator:
                         messages.append(self._tool_result_message(tool_call, result))
                         continue
 
-                    request = tool.build_request(tool_call.arguments)
-                    request.request_id = tool_call.id
-                    decision = self.policy_engine.evaluate(request)
+                    try:
+                        request = tool.build_request(tool_call.arguments)
+                        request.request_id = tool_call.id
+                        decision = self.policy_engine.evaluate(request)
+                    except Exception as exc:
+                        # Same principle as the tool.execute() guard below:
+                        # a malformed-but-technically-a-dict argument set
+                        # (found by fuzzing -- e.g. a model returning an int
+                        # where a command string was expected) can still
+                        # raise inside a tool's own build_request(), or
+                        # inside policy evaluation itself. That must not
+                        # escape the turn any more than an execution failure
+                        # would -- it becomes an ordinary failed tool result.
+                        error_msg = f"{type(exc).__name__}: {exc}"
+                        result = {"success": False, "error": f"Could not evaluate this action: {error_msg}"}
+                        yield OrchestratorEvent("error", result["error"])
+                        messages.append(self._tool_result_message(tool_call, result))
+                        continue
+
                     yield OrchestratorEvent("tool_call", {"tool": tool.name, "args": tool_call.arguments, "decision": decision})
 
                     outcome = self._handle_decision(tool, tool_call.arguments, request, decision)
