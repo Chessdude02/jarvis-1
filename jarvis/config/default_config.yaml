@@ -1,0 +1,71 @@
+# JARVIS default configuration.
+# A copy of this file is written to the user config directory on first run
+# (see settings.py) and can be edited there without touching the repo.
+
+llm:
+  provider: ollama
+  host: "http://127.0.0.1:11434"
+  model: "qwen2.5:7b-instruct"   # must support Ollama tool-calling
+  temperature: 0.2
+  request_timeout_seconds: 120
+
+# Directories JARVIS is allowed to index / read from. Nothing outside these
+# roots is ever scanned automatically. Expand ~ and %USERPROFILE% at load time.
+indexed_roots:
+  - "~/Projects"
+  - "~/Documents"
+  - "~/Downloads"
+  - "~/Desktop"
+
+# Directories that are ALWAYS excluded from indexing/search, even if nested
+# inside an indexed root. Matched case-insensitively against path segments.
+excluded_dirs:
+  - ".git"
+  - "node_modules"
+  - "__pycache__"
+  - ".venv"
+  - "venv"
+  - "site-packages"
+  - "$RECYCLE.BIN"
+  - "AppData"
+
+# Directories JARVIS must never read, index, or execute anything against,
+# regardless of what the LLM asks for. Checked before every filesystem tool.
+system_deny_roots:
+  - "C:\\Windows"
+  - "C:\\Program Files"
+  - "C:\\Program Files (x86)"
+  - "C:\\ProgramData"
+  - "~/.ssh"
+  - "~/.aws"
+  - "~/.gnupg"
+  - "%APPDATA%\\Microsoft\\Credentials"
+  - "%LOCALAPPDATA%\\Microsoft\\Credentials"
+  - "%LOCALAPPDATA%\\Google\\Chrome\\User Data"
+  - "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles"
+  - "%APPDATA%\\Mozilla\\Firefox\\Profiles"
+
+limits:
+  max_command_execution_seconds: 30
+  max_commands_per_request: 5
+  max_subprocess_count: 3
+  max_filesystem_ops_per_action: 2000
+  max_output_bytes: 200000
+  max_recursive_depth: 8
+  max_files_scanned_per_search: 5000
+
+ui:
+  global_hotkey: "ctrl+shift+j"
+  emergency_stop_hotkey: "ctrl+shift+esc"
+  entity_size_px: 96
+  theme: "dark"
+
+approval:
+  # "always" | "session" | "once" -- default requested scope shown in the UI.
+  default_scope: "once"
+
+network:
+  # Core JARVIS never makes network calls except to the local Ollama host
+  # above. This flag gates the separate, opt-in online-information feature
+  # described in a later phase -- it is OFF by default and unused by Phase 1.
+  online_features_enabled: false

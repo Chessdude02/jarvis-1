@@ -1,0 +1,11 @@
+# Core
+PySide6>=6.7,<7
+psutil>=5.9,<6
+PyYAML>=6.0,<7
+requests>=2.31,<3
+keyboard>=0.13,<0.14 ; sys_platform == 'win32'
+pywin32>=306 ; sys_platform == 'win32'
+
+# Testing
+pytest>=8.0,<9
+pytest-timeout>=2.3,<3
