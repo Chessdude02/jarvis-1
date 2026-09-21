@@ -39,8 +39,10 @@ class SecurityMonitor:
         rapid_action_threshold: int = 6,
         rapid_action_window_seconds: float = 10.0,
         lockout_seconds: float = 120.0,
+        lockdown_manager=None,
     ) -> None:
         self.audit_sink = audit_sink
+        self.lockdown_manager = lockdown_manager
         self.window_seconds = window_seconds
         self.denial_threshold = denial_threshold
         self.blocked_tool_threshold = blocked_tool_threshold
@@ -126,6 +128,11 @@ class SecurityMonitor:
                 event_type="security_alert", kind=alert.kind, detail=alert.detail,
                 tool=request.tool_name, locked_out=alert.locked_out_key,
             )
+        if alert and self.lockdown_manager is not None:
+            # Any alert here already crossed a real threshold (not noise);
+            # feed it into the global lockdown state machine, which
+            # auto-escalates to full LOCKDOWN if this keeps happening.
+            self.lockdown_manager.mark_suspicious(f"{alert.kind}: {alert.detail}")
         return alert
 
     def _prune(self, now: float) -> None:

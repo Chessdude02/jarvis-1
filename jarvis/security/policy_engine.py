@@ -23,6 +23,7 @@ from typing import Callable, Optional, Protocol
 
 from jarvis.security import deny_list
 from jarvis.security.command_validator import classify_command
+from jarvis.security.lockdown import LockdownManager
 from jarvis.security.monitor import SecurityMonitor
 from jarvis.security.permissions import (
     ActionRequest,
@@ -73,6 +74,7 @@ class PolicyEngine:
         audit_sink: Optional[AuditSink] = None,
         security_monitor: Optional[SecurityMonitor] = None,
         kill_switch=None,
+        lockdown_manager: Optional[LockdownManager] = None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry or {}
@@ -80,6 +82,7 @@ class PolicyEngine:
         self.audit_sink = audit_sink
         self.security_monitor = security_monitor
         self.kill_switch = kill_switch
+        self.lockdown_manager = lockdown_manager
 
     # -- public API -----------------------------------------------------
 
@@ -118,6 +121,21 @@ class PolicyEngine:
             request.cwd = None
         if not isinstance(request.command, str):
             request.command = None
+
+        # -0.5. LOCKDOWN: the most absolute gate in this method, checked
+        # before even the per-tool behavioral lockout. In LOCKDOWN, only a
+        # small hardcoded set of pure machine-diagnostic reads are allowed
+        # -- not "everything READ-category", not anything filesystem- or
+        # project-touching. Nothing about how the request is phrased can
+        # change this; the only way out is LockdownManager.exit_lockdown(),
+        # which itself requires an explicit human confirmation flag.
+        if self.lockdown_manager is not None and self.lockdown_manager.is_locked_down():
+            if not self.lockdown_manager.is_tool_allowed(request.tool_name):
+                return _deny(
+                    "JARVIS is in LOCKDOWN mode after suspicious activity was detected. "
+                    "Only read-only diagnostics are available. Open the Security Center to review "
+                    "what triggered this and exit lockdown explicitly if you want to resume normal use."
+                )
 
         # 0. Behavioral lockout: independent of what this specific request
         # would otherwise resolve to. Checked first and fails closed --

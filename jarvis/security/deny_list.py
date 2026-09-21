@@ -94,6 +94,38 @@ DENY_COMMAND_PATTERNS: tuple[re.Pattern, ...] = tuple(re.compile(p, re.IGNORECAS
     r"wget[^|]*\|\s*(bash|sh)\b",
     r"invoke-webrequest.*\|\s*iex\b",
     r"-enc(odedcommand)?\s+[a-z0-9+/=]{40,}",  # obfuscated/base64 PowerShell
+
+    # --- "JARVIS must not become an attack tool" (network/credential/exploit
+    # tooling). These are outright denied, not merely gated as DESTRUCTIVE --
+    # per the spec, a network scanner, credential cracker, or exploit runner
+    # "must not exist in the normal JARVIS toolset" at all, which is a
+    # stronger bar than "requires approval". Anchored to the actual binary
+    # names/argument styles of real tools, not generic words, to avoid
+    # false-positiving on unrelated commands (e.g. "john" alone is a common
+    # name, so it's paired with John the Ripper's own flag style below).
+    r"\bnmap\b",
+    r"\bmasscan\b",
+    r"\bzmap\b",
+    r"\bhydra\b",
+    r"\bmedusa\s+-[a-z]*h\b",  # medusa brute-forcer (its -h differs from --help usage)
+    r"\bsqlmap\b",
+    r"\bmsfconsole\b|\bmsfvenom\b|\bmsfdb\b",
+    r"\bmetasploit\b",
+    r"\bhashcat\b",
+    r"\bjohn\b.*(--wordlist|--format=)",  # John the Ripper, not the name "john"
+    r"\baircrack-ng\b|\bairodump-ng\b|\baireplay-ng\b",
+    r"\bresponder\.py\b|\bResponder\b.*-i\b",
+    r"\bmimikatz\b",
+    r"\bcrackmapexec\b|\bcme\s+(smb|winrm|ssh|mssql)\b",
+    r"\bevil-winrm\b",
+    r"\bbettercap\b|\bettercap\b",
+    r"\bwpscan\b",
+    r"\bnikto\b",
+    r"\bsharphound\b|\bbloodhound\.py\b",
+    r"\blazagne\b",
+    r"\bbeef-xss\b",
+    r"\b(nc|ncat|netcat)\b[^|;&\n]*(-e|--exec|--sh-exec)\s+\S",  # reverse/bind shell via execute flag
+    r"\bsetoolkit\b",  # Social-Engineer Toolkit
 ))
 
 

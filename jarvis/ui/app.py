@@ -18,6 +18,7 @@ from jarvis.core.orchestrator import EntityState, Orchestrator
 from jarvis.llm.ollama_client import OllamaClient
 from jarvis.security.audit import AuditLog
 from jarvis.security.kill_switch import KillSwitch
+from jarvis.security.lockdown import LockdownManager
 from jarvis.security.monitor import SecurityMonitor
 from jarvis.security.permissions import ApprovalScope
 from jarvis.security.policy_engine import PolicyEngine
@@ -96,13 +97,15 @@ class JarvisApp:
         self.registry = build_default_registry()
         self.audit_log = AuditLog(self.settings.audit_db_path)
         self.memory = Memory(self.settings.memory_db_path)
-        self.security_monitor = SecurityMonitor(audit_sink=self.audit_log)
+        self.lockdown_manager = LockdownManager(audit_sink=self.audit_log)
+        self.security_monitor = SecurityMonitor(audit_sink=self.audit_log, lockdown_manager=self.lockdown_manager)
         self.sandbox = Sandbox(self.settings)
         self.kill_switch = KillSwitch(self.sandbox, audit_sink=self.audit_log, security_monitor=self.security_monitor)
         self.policy_engine = PolicyEngine(
             self.settings, self.registry.policy_specs(),
             grant_store=self.memory, audit_sink=self.audit_log,
             security_monitor=self.security_monitor, kill_switch=self.kill_switch,
+            lockdown_manager=self.lockdown_manager,
         )
         self.llm_client = OllamaClient(self.settings)
 
