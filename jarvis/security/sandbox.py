@@ -137,6 +137,18 @@ class Sandbox:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                # Default text-mode decoding is strict: a command emitting
+                # any byte sequence that isn't valid UTF-8 (a binary tool, a
+                # crash dump, a different-locale program) raised an uncaught
+                # UnicodeDecodeError inside the _drain thread below. Threads
+                # swallow unhandled exceptions silently, so this didn't
+                # crash the app -- it silently killed output capture
+                # entirely and returned success=True with empty stdout,
+                # which is worse: a fabricated-looking clean result instead
+                # of a visible failure. "replace" keeps decoding instead of
+                # aborting, substituting U+FFFD for bad bytes.
+                errors="replace",
                 bufsize=1,
                 **popen_kwargs,
             )

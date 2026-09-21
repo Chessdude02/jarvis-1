@@ -21,6 +21,24 @@ def test_run_failing_command_reports_nonzero_exit(sandbox, tmp_path):
     assert result.return_code == 7
 
 
+def test_invalid_utf8_output_does_not_silently_lose_the_result(sandbox, tmp_path):
+    # Found by testing: default text-mode decoding is strict, so any
+    # command emitting a non-UTF-8 byte sequence (a binary tool, a
+    # different-locale program) raised an uncaught UnicodeDecodeError
+    # inside the background _drain thread. Threads swallow unhandled
+    # exceptions, so this silently killed output capture and returned
+    # success=True with an EMPTY stdout -- a fabricated-looking clean
+    # result instead of a visible failure. Must now preserve the
+    # surrounding valid text with the invalid bytes replaced, not vanish.
+    cmd = ("python3 -c \"import sys; sys.stdout.buffer.write("
+           "bytes([0x62,0x65,0x66,0x6f,0x72,0x65,0xff,0xfe,0x61,0x66,0x74,0x65,0x72,0x0a]))\"")
+    result = sandbox.run(cmd, str(tmp_path))
+    assert result.return_code == 0
+    assert "before" in result.stdout
+    assert "after" in result.stdout
+    assert result.stdout != ""
+
+
 def test_timeout_kills_long_running_process(settings, tmp_path):
     from jarvis.security.sandbox import Sandbox
     settings.limits.max_command_execution_seconds = 1
