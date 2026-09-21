@@ -6,6 +6,7 @@ a different module entirely and is never reachable through this client.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -14,6 +15,27 @@ import requests
 
 class OllamaUnavailableError(RuntimeError):
     pass
+
+
+def _normalize_arguments(raw: Any) -> dict[str, Any]:
+    """Guarantees ToolCall.arguments is always a dict, regardless of what a
+    given model actually returns. Most tool-calling models return an already
+    -parsed JSON object here, but some (especially smaller local models)
+    return the arguments as a raw JSON string, or omit them, or return
+    something malformed entirely -- and every downstream consumer
+    (Tool.build_request, Tool.execute) does plain dict-style access with no
+    type check of its own. Without normalizing here, a model's formatting
+    quirk becomes an uncaught AttributeError deep in the orchestrator loop.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 @dataclass
@@ -76,7 +98,7 @@ class OllamaClient:
         tool_calls = []
         for i, tc in enumerate(message.get("tool_calls", []) or []):
             fn = tc.get("function", {})
-            tool_calls.append(ToolCall(id=str(tc.get("id", i)), name=fn.get("name", ""), arguments=fn.get("arguments", {}) or {}))
+            tool_calls.append(ToolCall(id=str(tc.get("id", i)), name=fn.get("name", ""), arguments=_normalize_arguments(fn.get("arguments"))))
         return ChatResponse(content=message.get("content", "") or "", tool_calls=tool_calls, raw=body)
 
     def chat_stream(self, messages: list[dict]) -> Iterator[str]:

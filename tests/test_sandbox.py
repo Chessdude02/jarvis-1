@@ -75,17 +75,23 @@ def test_emergency_stop_kills_active_processes(settings, tmp_path):
     import threading
 
     settings.limits.max_command_execution_seconds = 30
+    settings.limits.max_subprocess_count = 10
     sandbox = Sandbox(settings)
+    results = []
 
     def run_long():
-        sandbox.run("sleep 20", str(tmp_path))
+        results.append(sandbox.run("sleep 15", str(tmp_path)))
 
-    t = threading.Thread(target=run_long)
-    t.start()
-    time.sleep(0.3)
-    assert sandbox.active_count >= 1
+    threads = [threading.Thread(target=run_long) for _ in range(8)]
+    for t in threads:
+        t.start()
+    time.sleep(0.5)
+    assert sandbox.active_count == 8
 
     killed = sandbox.emergency_stop_all()
-    assert killed >= 1
-    t.join(timeout=5)
+    assert killed == 8
+    for t in threads:
+        t.join(timeout=10)
+    assert sandbox.active_count == 0
+    assert all(r.return_code != 0 for r in results), "a concurrently running command survived emergency stop"
     assert sandbox.active_count == 0

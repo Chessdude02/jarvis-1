@@ -174,6 +174,15 @@ class Orchestrator:
                         messages.append(self._tool_result_message(tool_call, result))
                         continue
 
+                    if not isinstance(tool_call.arguments, dict):
+                        # Defense in depth: OllamaClient already normalizes
+                        # arguments to a dict, but nothing upstream of this
+                        # loop is trusted to guarantee that shape.
+                        result = {"success": False, "error": f"Malformed arguments for '{tool_call.name}' (expected an object)."}
+                        yield OrchestratorEvent("tool_result", result)
+                        messages.append(self._tool_result_message(tool_call, result))
+                        continue
+
                     request = tool.build_request(tool_call.arguments)
                     request.request_id = tool_call.id
                     decision = self.policy_engine.evaluate(request)
@@ -260,7 +269,19 @@ class Orchestrator:
 
         out.events.append(OrchestratorEvent("state", EntityState.EXECUTING))
         context = ToolContext(settings=self.settings, sandbox=self.sandbox, memory=self.memory, project_index=self._project_index)
-        result = tool.execute(args, context)
+        try:
+            result = tool.execute(args, context)
+        except Exception as exc:
+            # A malformed tool call (e.g. the model omitting a required
+            # argument) must never crash the turn -- it must be reported the
+            # same as any other tool failure: nothing was changed, here is
+            # why. Without this, an uncaught exception here would propagate
+            # out of the whole handle_message generator mid-turn, on the
+            # background thread, leaving the UI stuck in EXECUTING with the
+            # chat input disabled forever (turn_finished never emitted).
+            from jarvis.tools.base import ToolResult
+            error_msg = f"{type(exc).__name__}: {exc}"
+            result = ToolResult(False, error=error_msg, facts=[f"I couldn't complete that operation.\nReason: {error_msg}\nNothing was changed."])
         out.executed = True
         out.result_dict = {"success": result.success, "data": result.data, "error": result.error, "facts": result.facts}
         out.events.append(OrchestratorEvent("tool_result", out.result_dict))

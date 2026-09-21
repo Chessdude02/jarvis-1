@@ -74,6 +74,43 @@ def test_destructive_action_is_gated_and_denial_is_respected(settings, registry,
     assert any(r["success"] is False and "denied" in (r.get("error") or "").lower() for r in tool_results)
 
 
+def test_runaway_llm_loop_is_bounded(settings, registry, policy_engine, sandbox, audit_log, memory):
+    # A model stuck proposing tool calls forever (or adversarially trying to
+    # keep JARVIS running actions indefinitely) must not hang the turn.
+    call_count = {"n": 0}
+
+    def never_stopping_chat(messages, tools=None):
+        call_count["n"] += 1
+        return ChatResponse(content="", tool_calls=[ToolCall(id=str(call_count["n"]), name="get_memory_usage", arguments={})])
+
+    orch = make_orchestrator(settings, registry, policy_engine, sandbox, audit_log, memory, lambda r, d: ApprovalScope.ONCE)
+    orch.llm.chat = never_stopping_chat
+
+    events = list(orch.handle_message("do something forever"))
+    assert call_count["n"] <= 10  # bounded round-trips, not unbounded
+    assert any(e.type == "error" for e in events)
+
+
+def test_single_response_flood_of_tool_calls_is_capped(settings, registry, policy_engine, sandbox, audit_log, memory):
+    # max_commands_per_request must hold even when all the calls arrive in
+    # ONE LLM response, not just across multiple round-trips.
+    settings.limits.max_commands_per_request = 5
+    call_count = {"n": 0}
+
+    def flood_chat(messages, tools=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return ChatResponse(content="", tool_calls=[ToolCall(id=str(i), name="get_memory_usage", arguments={}) for i in range(200)])
+        return ChatResponse(content="done", tool_calls=[])
+
+    orch = make_orchestrator(settings, registry, policy_engine, sandbox, audit_log, memory, lambda r, d: ApprovalScope.ONCE)
+    orch.llm.chat = flood_chat
+
+    events = list(orch.handle_message("do 200 things at once"))
+    errors = [e.payload for e in events if e.type == "error"]
+    assert any("limit" in str(e).lower() or "maximum" in str(e).lower() for e in errors)
+
+
 def test_max_commands_per_request_limit_is_enforced(settings, registry, policy_engine, sandbox, audit_log, memory):
     settings.limits.max_commands_per_request = 2
     call_log = []
@@ -120,6 +157,45 @@ def test_emergency_stop_aborts_remaining_execution(settings, registry, policy_en
     assert any(e.type == "error" and "emergency stop" in str(e.payload).lower() for e in events)
     approval_events = [e for e in events if e.type == "approval_request"]
     assert len(approval_events) == 1  # the second action was never reached
+
+
+def test_missing_required_argument_does_not_crash_the_turn(settings, registry, policy_engine, sandbox, audit_log, memory):
+    # Found by stress testing: a tool call missing a required argument
+    # (list_directory needs "path") raised an uncaught KeyError straight out
+    # of tool.execute(), which would have propagated out of the whole
+    # handle_message generator on the orchestrator's background thread.
+    def fake_chat(messages, tools=None):
+        if not fake_chat.called:
+            fake_chat.called = True
+            return ChatResponse(content="", tool_calls=[ToolCall(id="1", name="list_directory", arguments={})])
+        return ChatResponse(content="handled", tool_calls=[])
+    fake_chat.called = False
+
+    orch = make_orchestrator(settings, registry, policy_engine, sandbox, audit_log, memory, lambda r, d: ApprovalScope.ONCE)
+    orch.llm.chat = fake_chat
+
+    events = list(orch.handle_message("list a directory"))  # must not raise
+    tool_results = [e.payload for e in events if e.type == "tool_result"]
+    assert any(r["success"] is False for r in tool_results)
+    assert any(e.type == "assistant_text" and e.payload == "handled" for e in events)
+
+
+def test_non_dict_tool_arguments_does_not_crash_the_turn(settings, registry, policy_engine, sandbox, audit_log, memory):
+    # Found by stress testing: some models return tool-call arguments as a
+    # plain string or other non-object shape instead of a JSON object.
+    def fake_chat(messages, tools=None):
+        if not fake_chat.called:
+            fake_chat.called = True
+            return ChatResponse(content="", tool_calls=[ToolCall(id="1", name="list_directory", arguments="not a dict")])
+        return ChatResponse(content="handled", tool_calls=[])
+    fake_chat.called = False
+
+    orch = make_orchestrator(settings, registry, policy_engine, sandbox, audit_log, memory, lambda r, d: ApprovalScope.ONCE)
+    orch.llm.chat = fake_chat
+
+    events = list(orch.handle_message("list a directory"))  # must not raise
+    tool_results = [e.payload for e in events if e.type == "tool_result"]
+    assert any(r["success"] is False for r in tool_results)
 
 
 def test_session_grant_avoids_repeated_approval_within_session(settings, registry, policy_engine, sandbox, audit_log, memory):

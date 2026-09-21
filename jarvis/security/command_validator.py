@@ -99,12 +99,14 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
             ["Command references a system directory."],
         )
 
-    # Chaining/piping/redirection operators (;, &&, |, `, $(...), >, >>, <) must
-    # be checked BEFORE prefix matching below. Otherwise a command like
-    # "echo hi > ~/.bashrc" or "dir & npm publish" would match the READ prefix
-    # "echo"/"dir" via startswith() and never have its trailing, unverified
-    # second half looked at at all.
-    if any(sep in stripped for sep in (";", "&&", "||", "|", "`", "$(", ">", "<", "&")):
+    # Chaining/piping/redirection operators (;, &&, |, `, $(...), >, >>, <,
+    # newline) must be checked BEFORE prefix matching below. Otherwise a
+    # command like "echo hi > ~/.bashrc", "dir & npm publish", or
+    # "git status\nnpm publish" would match the READ prefix "echo"/"dir"/
+    # "git status" via startswith() and never have its trailing, unverified
+    # remainder looked at at all. Embedded newlines are just as much a
+    # command separator to cmd.exe/sh -c as ";" is.
+    if any(sep in stripped for sep in (";", "&&", "||", "|", "`", "$(", ">", "<", "&", "\n", "\r")):
         return CommandClassification(
             PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH,
             ["Command chains, pipes, or redirects multiple operations; not individually verifiable."],

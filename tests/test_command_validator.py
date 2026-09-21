@@ -96,3 +96,16 @@ def test_chain_after_safe_prefix_is_not_read_only():
 def test_plain_echo_with_no_metacharacters_is_read_only():
     result = classify_command("echo hello world")
     assert result.category == PermissionLevel.READ
+
+
+def test_newline_after_safe_prefix_is_not_read_only():
+    # Found by fuzzing: a newline is as much a command separator to cmd.exe
+    # or sh -c as ";" is, and must not let a second, unverified command
+    # ride along behind a safe-looking first line.
+    result = classify_command("git status\nnpm publish --access public")
+    assert result.category == PermissionLevel.DESTRUCTIVE
+
+
+def test_crlf_after_safe_prefix_is_not_read_only():
+    result = classify_command("dir\r\nnpm publish --access public")
+    assert result.category == PermissionLevel.DESTRUCTIVE
