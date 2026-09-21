@@ -92,6 +92,15 @@ class Sandbox:
         with self._lock:
             return len(self._active)
 
+    def most_recent_execution_id(self) -> str | None:
+        """Used by kill-switch Level 1 ('cancel current action', as opposed
+        to Level 2's 'stop everything'). dict insertion order is reliable in
+        Python 3.7+, so the last key is the most recently started execution.
+        """
+        with self._lock:
+            keys = list(self._active.keys())
+            return keys[-1] if keys else None
+
     def run(self, command: str, cwd: str) -> SandboxResult:
         limits = self.settings.limits
         execution_id = uuid.uuid4().hex[:12]

@@ -17,6 +17,8 @@ from jarvis.core.memory import Memory
 from jarvis.core.orchestrator import EntityState, Orchestrator
 from jarvis.llm.ollama_client import OllamaClient
 from jarvis.security.audit import AuditLog
+from jarvis.security.kill_switch import KillSwitch
+from jarvis.security.monitor import SecurityMonitor
 from jarvis.security.permissions import ApprovalScope
 from jarvis.security.policy_engine import PolicyEngine
 from jarvis.security.sandbox import Sandbox
@@ -24,6 +26,7 @@ from jarvis.tools.registry import build_default_registry
 from jarvis.ui.approval_dialog import ApprovalDialog
 from jarvis.ui.chat_window import ChatWindow
 from jarvis.ui.entity_widget import EntityWidget
+from jarvis.ui.security_center import SecurityCenterWindow
 from jarvis.ui.status_window import StatusWindow
 
 
@@ -93,8 +96,14 @@ class JarvisApp:
         self.registry = build_default_registry()
         self.audit_log = AuditLog(self.settings.audit_db_path)
         self.memory = Memory(self.settings.memory_db_path)
-        self.policy_engine = PolicyEngine(self.settings, self.registry.policy_specs(), grant_store=self.memory, audit_sink=self.audit_log)
+        self.security_monitor = SecurityMonitor(audit_sink=self.audit_log)
         self.sandbox = Sandbox(self.settings)
+        self.kill_switch = KillSwitch(self.sandbox, audit_sink=self.audit_log, security_monitor=self.security_monitor)
+        self.policy_engine = PolicyEngine(
+            self.settings, self.registry.policy_specs(),
+            grant_store=self.memory, audit_sink=self.audit_log,
+            security_monitor=self.security_monitor, kill_switch=self.kill_switch,
+        )
         self.llm_client = OllamaClient(self.settings)
 
         self.app = QApplication(sys.argv)
@@ -103,6 +112,7 @@ class JarvisApp:
         self.entity = EntityWidget(self.settings.entity_size_px)
         self.chat = ChatWindow()
         self.status_window = StatusWindow()
+        self.security_center: SecurityCenterWindow | None = None
 
         self.approval_bridge = ApprovalBridge(self.entity)
 
@@ -112,6 +122,11 @@ class JarvisApp:
             approval_callback=self.approval_bridge.request_approval,
         )
         self.orchestrator.refresh_project_index()
+        # Level 2 (stop_all_actions) also needs the orchestrator's reasoning
+        # loop to actually stop proposing further steps, not just lose its
+        # current subprocess -- register that on top of KillSwitch's own
+        # (idempotent) sandbox kill.
+        self.kill_switch.register_orchestrator_stop(lambda: self.orchestrator._stop_event.set())
 
         self._setup_worker_thread()
         self._position_entity()
@@ -143,9 +158,12 @@ class JarvisApp:
         menu = QMenu()
         menu.addAction(QAction("Open JARVIS", menu, triggered=self._toggle_chat))
         menu.addAction(QAction("Status", menu, triggered=self._show_status))
-        menu.addAction(QAction("Emergency Stop", menu, triggered=self._emergency_stop))
+        menu.addAction(QAction("Security Center", menu, triggered=self._show_security_center))
         menu.addSeparator()
-        menu.addAction(QAction("Quit", menu, triggered=self.app.quit))
+        menu.addAction(QAction("Cancel Current Action (Level 1)", menu, triggered=self._cancel_current_action))
+        menu.addAction(QAction("Emergency Stop -- Stop All (Level 2)", menu, triggered=self._emergency_stop))
+        menu.addSeparator()
+        menu.addAction(QAction("Quit (Level 5)", menu, triggered=self._exit_jarvis))
         self.tray.setContextMenu(menu)
         self.tray.setToolTip("JARVIS")
         self.tray.show()
@@ -224,11 +242,35 @@ class JarvisApp:
         self.status_window.move(self.entity.pos().x() - self.status_window.width() - 12, self.entity.pos().y())
         self.status_window.show()
 
+    def _show_security_center(self) -> None:
+        if self.security_center is None:
+            self.security_center = SecurityCenterWindow(self)
+        else:
+            self.security_center.refresh()
+        self.security_center.show()
+        self.security_center.raise_()
+        self.security_center.activateWindow()
+
+    def _exit_jarvis(self) -> None:
+        """Kill-switch Level 5."""
+        self.kill_switch.request_exit()
+        self.app.quit()
+
     def _emergency_stop(self) -> None:
-        killed = self.orchestrator.emergency_stop()
+        """Kill-switch Level 2. Calls KillSwitch.stop_all_actions() directly
+        -- never through the orchestrator/LLM loop -- which kills every
+        sandboxed process and (via the registered callback) stops the
+        orchestrator's reasoning loop too."""
+        killed = self.kill_switch.stop_all_actions()
         self.entity.set_state(EntityState.IDLE)
-        self.chat.append("error", f"EMERGENCY STOP engaged. {killed} active process(es) terminated. All queued actions cancelled.")
+        self.chat.append("error", f"EMERGENCY STOP (Level 2) engaged. {killed} active process(es) terminated. All queued actions cancelled.")
         self.chat.set_input_enabled(True)
+
+    def _cancel_current_action(self) -> None:
+        """Kill-switch Level 1: stop just the most recent action, not everything."""
+        cancelled = self.kill_switch.cancel_current_action()
+        self.chat.append("error" if cancelled else "system",
+                          "Cancelled the current action." if cancelled else "No action is currently running to cancel.")
 
     def _on_message_sent(self, text: str) -> None:
         from PySide6.QtCore import QMetaObject, Q_ARG

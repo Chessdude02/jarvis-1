@@ -141,6 +141,13 @@ class Memory:
     def clear_session_grants(self) -> None:
         self._session_grants.clear()
 
+    def list_session_grants(self) -> list[str]:
+        return sorted(self._session_grants)
+
+    def list_permanent_grants(self) -> list[str]:
+        cur = self._conn.execute("SELECT grant_key FROM grants ORDER BY ts DESC")
+        return [row[0] for row in cur.fetchall()]
+
     # -- user-facing inspect/delete ------------------------------------------
 
     def delete_all(self, category: str) -> None:

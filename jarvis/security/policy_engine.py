@@ -23,6 +23,7 @@ from typing import Callable, Optional, Protocol
 
 from jarvis.security import deny_list
 from jarvis.security.command_validator import classify_command
+from jarvis.security.monitor import SecurityMonitor
 from jarvis.security.permissions import (
     ActionRequest,
     Decision,
@@ -70,11 +71,15 @@ class PolicyEngine:
         tool_registry: dict[str, ToolSpec] | None = None,
         grant_store: Optional[GrantStore] = None,
         audit_sink: Optional[AuditSink] = None,
+        security_monitor: Optional[SecurityMonitor] = None,
+        kill_switch=None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry or {}
         self.grant_store = grant_store
         self.audit_sink = audit_sink
+        self.security_monitor = security_monitor
+        self.kill_switch = kill_switch
 
     # -- public API -----------------------------------------------------
 
@@ -92,11 +97,30 @@ class PolicyEngine:
                 risk=decision.risk.value,
                 reasons=decision.reasons,
             )
+        if self.security_monitor is not None:
+            self.security_monitor.observe(request, decision)
         return decision
 
     # -- internals --------------------------------------------------------
 
     def _evaluate(self, request: ActionRequest) -> PolicyDecision:
+        # 0. Behavioral lockout: independent of what this specific request
+        # would otherwise resolve to. Checked first and fails closed --
+        # a tool under lockout refuses everything, including what would
+        # normally be a plain READ, until the cooldown expires or a human
+        # clears it from the Security Center.
+        if self.security_monitor is not None:
+            lockout_reason = self.security_monitor.check_lockout(request)
+            if lockout_reason:
+                return _deny(lockout_reason)
+
+        # 0b. Kill-switch Level 3: terminal disabled. Independent of the
+        # policy category a command would otherwise get -- while disabled,
+        # execute_command refuses everything, including a plain "git status".
+        if self.kill_switch is not None and self.kill_switch.is_terminal_disabled() and request.tool_name == "execute_command":
+            return _deny("Terminal execution is currently disabled (kill-switch Level 3). "
+                         "Re-enable it from the Security Center.")
+
         # 1. Absolute deny list: tool name.
         reason = deny_list.denied_tool(request.tool_name)
         if reason:
