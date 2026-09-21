@@ -6,14 +6,15 @@ user FROM JARVIS/the LLM. Memory exists to make JARVIS more useful TO the
 user, so the user is fully in control of it -- everything here has a
 delete path.
 
-A lightweight redaction pass runs on anything stored in the conversation
-table so an accidentally pasted secret doesn't linger in memory.db even
-though the LLM was never supposed to go looking for one.
+A lightweight redaction pass (jarvis.security.secrets.redact, the same
+deterministic scanner the audit log and command output use) runs on
+anything stored in the conversation table so an accidentally pasted secret
+doesn't linger in memory.db even though the LLM was never supposed to go
+looking for one.
 """
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -21,13 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_SECRET_PATTERNS = [
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"ghp_[a-zA-Z0-9]{30,}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(api[_-]?key|password|secret|token)\s*[:=]\s*['\"]?[^\s'\"]{8,}"),
-]
+from jarvis.security.secrets import redact
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversation (
@@ -49,12 +44,6 @@ CREATE TABLE IF NOT EXISTS grants (
     grant_key TEXT PRIMARY KEY, ts REAL NOT NULL
 );
 """
-
-
-def redact(text: str) -> str:
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub("[REDACTED]", text)
-    return text
 
 
 @dataclass

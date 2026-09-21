@@ -28,6 +28,7 @@ from jarvis.security.permissions import (
     Decision,
     PermissionLevel,
     PolicyDecision,
+    Reversibility,
     RiskLevel,
 )
 
@@ -162,6 +163,11 @@ class PolicyEngine:
 
         if spec is not None and spec.is_command_tool and request.command:
             cls = classify_command(request.command, request.cwd)
+            # Set on the request itself so the approval card (built from
+            # this same ActionRequest) can show it -- the command classifier
+            # is the one place that actually reasons about what the command
+            # does, so this is where reversibility gets decided too.
+            request.reversibility = cls.reversibility
             if cls.denied:
                 return PermissionLevel.DENY, cls.risk, cls.reasons
             return cls.category, cls.risk, cls.reasons
@@ -181,6 +187,14 @@ class PolicyEngine:
             PermissionLevel.DESTRUCTIVE: RiskLevel.HIGH,
             PermissionLevel.DENY: RiskLevel.CRITICAL,
         }
+        reversibility_by_category = {
+            PermissionLevel.READ: Reversibility.REVERSIBLE,
+            PermissionLevel.SAFE: Reversibility.REVERSIBLE,
+            PermissionLevel.MODIFY: Reversibility.REVERSIBLE,
+            PermissionLevel.DESTRUCTIVE: Reversibility.IRREVERSIBLE,
+            PermissionLevel.DENY: Reversibility.UNKNOWN,
+        }
+        request.reversibility = reversibility_by_category[spec.base_category]
         return spec.base_category, risk_by_category[spec.base_category], [f"Tool '{spec.name}' base category is {spec.base_category.value}."]
 
 

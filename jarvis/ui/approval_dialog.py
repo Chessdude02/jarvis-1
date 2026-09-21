@@ -9,9 +9,15 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout
 
-from jarvis.security.permissions import ActionRequest, ApprovalScope, PermissionLevel, PolicyDecision
+from jarvis.security.permissions import ActionRequest, ApprovalScope, PermissionLevel, PolicyDecision, Reversibility
 
 _RISK_COLORS = {"LOW": "#7fd18f", "MEDIUM": "#ffd27f", "HIGH": "#ff9d5c", "CRITICAL": "#ff6b6b"}
+_REVERSIBILITY_COLORS = {
+    Reversibility.REVERSIBLE: "#7fd18f",
+    Reversibility.PARTIALLY_REVERSIBLE: "#ffd27f",
+    Reversibility.IRREVERSIBLE: "#ff6b6b",
+    Reversibility.UNKNOWN: "#9aa3b0",
+}
 
 _STYLE = """
 QDialog { background-color: #12151c; color: #e6ecf5; font-family: 'Segoe UI', sans-serif; }
@@ -58,6 +64,11 @@ class ApprovalDialog(QDialog):
         risk_label = QLabel(f"Risk: <span style='color:{risk_color}'>{decision.risk.value}</span> ({decision.category.value})", self)
         risk_label.setTextFormat(Qt.RichText)
         layout.addWidget(risk_label)
+
+        rev_color = _REVERSIBILITY_COLORS.get(request.reversibility, "#e6ecf5")
+        rev_label = QLabel(f"Reversibility: <span style='color:{rev_color}'>{request.reversibility.value}</span>", self)
+        rev_label.setTextFormat(Qt.RichText)
+        layout.addWidget(rev_label)
 
         if decision.reasons:
             reasons = QLabel("Why: " + "; ".join(decision.reasons), self)

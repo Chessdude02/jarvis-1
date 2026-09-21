@@ -14,7 +14,7 @@ import shlex
 from dataclasses import dataclass, field
 
 from jarvis.security.deny_list import denied_command
-from jarvis.security.permissions import PermissionLevel, RiskLevel
+from jarvis.security.permissions import PermissionLevel, Reversibility, RiskLevel
 
 
 @dataclass
@@ -23,6 +23,7 @@ class CommandClassification:
     risk: RiskLevel
     reasons: list[str] = field(default_factory=list)
     denied: bool = False
+    reversibility: Reversibility = Reversibility.UNKNOWN
 
 
 # Read-only: informational commands with no filesystem/process/network side effects.
@@ -52,23 +53,44 @@ _MODIFY_PREFIXES = (
 )
 
 # Destructive: explicit patterns worth naming precisely (for the reason
-# string shown to the user) even though the fail-closed default would catch
-# most of these anyway.
-_DESTRUCTIVE_PATTERNS: tuple[re.Pattern, ...] = tuple(re.compile(p, re.IGNORECASE) for p in (
-    r"\brm\s+-rf\b", r"\brm\s+-r\b", r"\bremove-item\b.*-recurse",
-    r"\bdel\s+/s\b", r"\brd\s+/s\b", r"\brmdir\s+/s\b",
-    r"\bformat\s+[a-z]:\b", r"\bdiskpart\b",
-    r"\bshutdown\b", r"\brestart-computer\b",
-    r"\bgit\s+reset\s+--hard\b", r"\bgit\s+clean\s+-[a-z]*f",
-    r"\bgit\s+push\s+.*--force\b", r"\bgit\s+push\s+.*-f\b",
-    r"\bdrop\s+(table|database)\b", r"\btruncate\s+table\b",
-    r"\btaskkill\b.*\/f\b", r"\bstop-process\b.*-force",
-    r"\bnew-itemproperty\b", r"\bset-itemproperty\b",
-    r"\bunset\s+.*path\b", r"\bsetx\s+path\b",
-    r"\bnpm\s+uninstall\s+-g\b", r"\bpip\s+uninstall\s+-y\s+--all\b",
-    r"\bwmic\s+.*delete\b", r"\bicacls\b",
-    r"^\s*:\(\)\s*\{.*\}\s*;\s*:",  # fork bomb
-))
+# string AND the reversibility shown to the user) even though the
+# fail-closed default would catch most of these anyway as "unknown".
+# Each entry is (pattern, reversibility) -- deliberately a judgment call
+# made here by deterministic code, not left for the LLM to claim.
+_DESTRUCTIVE_PATTERNS: tuple[tuple[re.Pattern, Reversibility], ...] = tuple(
+    (re.compile(p, re.IGNORECASE), rev) for p, rev in (
+        (r"\brm\s+-rf\b", Reversibility.IRREVERSIBLE),
+        (r"\brm\s+-r\b", Reversibility.IRREVERSIBLE),
+        (r"\bremove-item\b.*-recurse", Reversibility.IRREVERSIBLE),
+        (r"\bdel\s+/s\b", Reversibility.IRREVERSIBLE),
+        (r"\brd\s+/s\b", Reversibility.IRREVERSIBLE),
+        (r"\brmdir\s+/s\b", Reversibility.IRREVERSIBLE),
+        # No trailing \b: a word boundary can't match between ":" and a
+        # following space/end-of-string/non-word char, so "format d: /q" or
+        # bare "format d:" would never match with one -- found by testing.
+        (r"\bformat\s+[a-z]:", Reversibility.IRREVERSIBLE),
+        (r"\bdiskpart\b", Reversibility.IRREVERSIBLE),
+        (r"\bshutdown\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\brestart-computer\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bgit\s+reset\s+--hard\b", Reversibility.IRREVERSIBLE),
+        (r"\bgit\s+clean\s+-[a-z]*f", Reversibility.IRREVERSIBLE),
+        (r"\bgit\s+push\s+.*--force\b", Reversibility.IRREVERSIBLE),
+        (r"\bgit\s+push\s+.*-f\b", Reversibility.IRREVERSIBLE),
+        (r"\bdrop\s+(table|database)\b", Reversibility.IRREVERSIBLE),
+        (r"\btruncate\s+table\b", Reversibility.IRREVERSIBLE),
+        (r"\btaskkill\b.*\/f\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bstop-process\b.*-force", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bnew-itemproperty\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bset-itemproperty\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bunset\s+.*path\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bsetx\s+path\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bnpm\s+uninstall\s+-g\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bpip\s+uninstall\s+-y\s+--all\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"\bwmic\s+.*delete\b", Reversibility.IRREVERSIBLE),
+        (r"\bicacls\b", Reversibility.PARTIALLY_REVERSIBLE),
+        (r"^\s*:\(\)\s*\{.*\}\s*;\s*:", Reversibility.IRREVERSIBLE),  # fork bomb
+    )
+)
 
 _SYSTEM_DIR_PATTERN = re.compile(
     r"c:\\windows\b|c:\\program files\b|/etc/|/bin/|/usr/bin", re.IGNORECASE
@@ -86,17 +108,19 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
 
     lowered = stripped.lower()
 
-    for pattern in _DESTRUCTIVE_PATTERNS:
+    for pattern, reversibility in _DESTRUCTIVE_PATTERNS:
         if pattern.search(lowered):
             return CommandClassification(
                 PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH,
                 [f"Matches destructive pattern: {pattern.pattern}"],
+                reversibility=reversibility,
             )
 
     if _SYSTEM_DIR_PATTERN.search(lowered) and not lowered.startswith(("dir", "ls", "type", "cat", "echo")):
         return CommandClassification(
             PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH,
             ["Command references a system directory."],
+            reversibility=Reversibility.UNKNOWN,
         )
 
     # Chaining/piping/redirection operators (;, &&, |, `, $(...), >, >>, <,
@@ -110,6 +134,7 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
         return CommandClassification(
             PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH,
             ["Command chains, pipes, or redirects multiple operations; not individually verifiable."],
+            reversibility=Reversibility.UNKNOWN,
         )
 
     try:
@@ -118,18 +143,20 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
         return CommandClassification(
             PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH,
             ["Command could not be safely parsed (unbalanced quoting)."],
+            reversibility=Reversibility.UNKNOWN,
         )
 
     for prefix in _READ_PREFIXES:
         if lowered.startswith(prefix):
-            return CommandClassification(PermissionLevel.READ, RiskLevel.LOW, [f"Matches read-only prefix '{prefix}'."])
+            return CommandClassification(PermissionLevel.READ, RiskLevel.LOW, [f"Matches read-only prefix '{prefix}'."], reversibility=Reversibility.REVERSIBLE)
 
     for prefix in _MODIFY_PREFIXES:
         if lowered.startswith(prefix):
-            return CommandClassification(PermissionLevel.MODIFY, RiskLevel.MEDIUM, [f"Matches routine modify prefix '{prefix}'."])
+            return CommandClassification(PermissionLevel.MODIFY, RiskLevel.MEDIUM, [f"Matches routine modify prefix '{prefix}'."], reversibility=Reversibility.REVERSIBLE)
 
     # Fail closed: unknown command shape, not on any allowlist.
     return CommandClassification(
         PermissionLevel.DESTRUCTIVE, RiskLevel.MEDIUM,
         ["Command does not match a known read-only or routine-modify pattern; treated as high-risk by default."],
+        reversibility=Reversibility.UNKNOWN,
     )

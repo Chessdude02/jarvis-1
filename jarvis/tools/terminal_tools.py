@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from jarvis.security.command_validator import classify_command
 from jarvis.security.permissions import PermissionLevel
+from jarvis.security.secrets import redact
 from jarvis.tools import path_guard
 from jarvis.tools.base import Tool, ToolContext, ToolResult
 
@@ -29,10 +30,15 @@ class ProposeCommandTool(Tool):
             "explanation": args["explanation"],
             "category": cls.category.value,
             "risk": cls.risk.value,
+            "reversibility": cls.reversibility.value,
             "reasons": cls.reasons,
             "requires_approval": cls.category != PermissionLevel.READ,
         }
-        facts = [f"Command: {args['command']}", f"Risk: {cls.risk.value} ({cls.category.value})."] + cls.reasons
+        facts = [
+            f"Command: {args['command']}",
+            f"Risk: {cls.risk.value} ({cls.category.value}).",
+            f"Reversibility: {cls.reversibility.value}.",
+        ] + cls.reasons
         return ToolResult(True, data, facts=facts)
 
 
@@ -69,22 +75,34 @@ class ExecuteCommandTool(Tool):
         result = context.sandbox.run(args["command"], cwd)
         if result.error:
             return ToolResult(False, error=result.error, facts=[f"I couldn't complete that operation.\nReason: {result.error}\nNothing was changed."])
+        # Redact BEFORE this output becomes a fact string or a data field --
+        # this is what the chat UI displays live and what goes back into the
+        # LLM's own context, not just what the audit log stores. A build
+        # script that prints an API key must not surface it either place.
+        stdout = redact(result.stdout)
+        stderr = redact(result.stderr)
+        # The command string itself can carry a secret (e.g. a bearer token
+        # in a curl -H argument). The approval card the user saw before
+        # execution showed it in full -- they need that to know exactly
+        # what they're approving -- but this post-execution report feeds
+        # back into chat history and the LLM's own context, so it gets the
+        # same redaction as stdout/stderr here.
         facts = [
-            f"Command: {args['command']}",
+            f"Command: {redact(args['command'])}",
             f"Exit code: {result.return_code}{' (TIMED OUT, process was killed)' if result.timed_out else ''}",
         ]
         if result.truncated:
             facts.append("Output was truncated at the configured output-size limit.")
-        if result.stdout.strip():
-            facts.append("stdout:\n" + result.stdout[-4000:])
-        if result.stderr.strip():
-            facts.append("stderr:\n" + result.stderr[-4000:])
+        if stdout.strip():
+            facts.append("stdout:\n" + stdout[-4000:])
+        if stderr.strip():
+            facts.append("stderr:\n" + stderr[-4000:])
         success = (result.return_code == 0) and not result.timed_out
         return ToolResult(success, {
             "execution_id": result.execution_id,
             "return_code": result.return_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": stdout,
+            "stderr": stderr,
             "timed_out": result.timed_out,
             "truncated": result.truncated,
             "duration_seconds": result.duration_seconds,

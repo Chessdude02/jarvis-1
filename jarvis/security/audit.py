@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from jarvis.security.secrets import redact_value
+
 _GENESIS_HASH = "0" * 64
 
 _SCHEMA = """
@@ -63,7 +65,15 @@ class AuditLog:
     def record(self, event_type: str, **data: Any) -> int:
         """Append one event. Returns the new row id. This is the ONLY way to
         write to this table; there is deliberately no update/delete method.
+
+        Every value is passed through the deterministic secret scanner
+        before it touches disk -- a tool that forgets to redact its own
+        output (command stdout, a file's contents, ...) still can't put a
+        credential into a durable, append-only log. This is defense in
+        depth, not the only redaction point: callers that display the same
+        content live (chat UI) must still redact it themselves too.
         """
+        data = redact_value(data)
         ts = datetime.now(timezone.utc).isoformat()
         data_json = json.dumps(data, default=str, sort_keys=True)
         with self._lock:

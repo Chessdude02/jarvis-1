@@ -44,6 +44,20 @@ class ApprovalScope(str, Enum):
     CANCEL = "cancel"
 
 
+class Reversibility(str, Enum):
+    """Shown on the approval card per spec: the user needs to know not just
+    the risk level but whether undoing this is possible at all. Deliberately
+    a judgment call made by the command classifier (or a tool's own
+    build_request), not the LLM -- the LLM cannot be trusted to accurately
+    self-report "yes this is reversible" for an action it wants approved.
+    """
+
+    REVERSIBLE = "Reversible"
+    PARTIALLY_REVERSIBLE = "Partially reversible"
+    IRREVERSIBLE = "Irreversible"
+    UNKNOWN = "Unknown"
+
+
 @dataclass
 class ActionRequest:
     """A tool call the LLM (or planner) wants to make, before any policy check."""
@@ -57,7 +71,7 @@ class ActionRequest:
     # Shell command string, only set for terminal tools.
     command: str | None = None
     cwd: str | None = None
-    reversible: bool | None = None
+    reversibility: Reversibility = Reversibility.UNKNOWN
     request_id: str = ""
     # Stable key used for "always allow this specific action" grants, e.g.
     # "execute_command:pip_install:project=<path>". Tools set this explicitly
