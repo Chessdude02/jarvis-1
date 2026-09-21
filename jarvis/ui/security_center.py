@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
+    QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
 )
 
 _STYLE = """
@@ -23,6 +23,8 @@ QPushButton#danger { background-color: #b03030; }
 QPushButton#danger:hover { background-color: #c94040; }
 QTextEdit { background-color: #0c0f14; border: 1px solid #2a3040; border-radius: 6px; padding: 6px; }
 """
+
+_LOCKDOWN_COLORS = {"NORMAL": "#7fd18f", "SUSPICIOUS": "#ffd27f", "LOCKDOWN": "#ff6b6b"}
 
 
 class SecurityCenterWindow(QDialog):
@@ -50,10 +52,12 @@ class SecurityCenterWindow(QDialog):
         scroll.setWidget(body)
         outer.addWidget(scroll)
 
+        self.lockdown_label = self._section("LOCKDOWN STATUS")
         self.status_label = self._section("STATUS")
         self.permissions_label = self._section("ACTIVE PERMISSIONS")
         self.actions_label = self._section("RUNNING / RECENT ACTIONS")
         self.blocked_label = self._section("BLOCKED ACTIONS / ALERTS")
+        self.rate_limit_label = self._section("RATE LIMITS")
         self.dirs_label = self._section("ALLOWED DIRECTORIES")
         self.network_label = self._section("NETWORK")
         self.limits_label = self._section("RESOURCE LIMITS")
@@ -94,11 +98,21 @@ class SecurityCenterWindow(QDialog):
         row4 = QHBoxLayout()
         self.btn_clear_lockouts = QPushButton("Clear Behavioral Lockouts", body)
         self.btn_clear_lockouts.clicked.connect(self._clear_lockouts)
+        self.btn_reset_rate_limits = QPushButton("Reset Rate Limits", body)
+        self.btn_reset_rate_limits.clicked.connect(self._reset_rate_limits)
+        row4.addWidget(self.btn_clear_lockouts)
+        row4.addWidget(self.btn_reset_rate_limits)
+        self.layout_.addLayout(row4)
+
+        row5 = QHBoxLayout()
+        self.btn_toggle_lockdown = QPushButton("Enter Lockdown", body)
+        self.btn_toggle_lockdown.setObjectName("danger")
+        self.btn_toggle_lockdown.clicked.connect(self._toggle_lockdown)
         self.btn_view_audit = QPushButton("View Audit Log", body)
         self.btn_view_audit.clicked.connect(self._view_audit_log)
-        row4.addWidget(self.btn_clear_lockouts)
-        row4.addWidget(self.btn_view_audit)
-        self.layout_.addLayout(row4)
+        row5.addWidget(self.btn_toggle_lockdown)
+        row5.addWidget(self.btn_view_audit)
+        self.layout_.addLayout(row5)
 
         self.layout_.addStretch()
 
@@ -121,6 +135,22 @@ class SecurityCenterWindow(QDialog):
         ctx = self.ctx
         ks_status = ctx.kill_switch.status()
         terminal_state = '<span style="color:#ff6b6b">DISABLED</span>' if ks_status["terminal_disabled"] else "enabled"
+
+        if ctx.lockdown_manager is not None:
+            ld_status = ctx.lockdown_manager.status()
+            color = _LOCKDOWN_COLORS.get(ld_status["state"], "#e6ecf5")
+            history_lines = "<br>".join(
+                f"&nbsp;&nbsp;[{h['state']}] {h['reason'][:80]}" for h in reversed(ld_status["history"][-5:])
+            ) or "&nbsp;&nbsp;(no events yet)"
+            self.lockdown_label.setText(
+                f"State: <span style='color:{color}'><b>{ld_status['state']}</b></span><br>"
+                f"Reason: {ld_status['reason'] or '(none)'}<br>"
+                f"Recent history:<br>{history_lines}"
+            )
+            is_locked = ld_status["state"] == "LOCKDOWN"
+            self.btn_toggle_lockdown.setText("Exit Lockdown" if is_locked else "Enter Lockdown")
+        else:
+            self.lockdown_label.setText("Lockdown manager not configured.")
 
         self.status_label.setText(
             f"LLM: {'Online' if ctx.llm_client.is_available() else 'Offline'}<br>"
@@ -152,6 +182,18 @@ class SecurityCenterWindow(QDialog):
             + "Recent alerts:<br>"
             + ("<br>".join(f"&nbsp;&nbsp;[{a.kind}] {a.detail[:70]}" for a in reversed(alerts)) or "&nbsp;&nbsp;(none)")
         )
+
+        if ctx.rate_limiter is not None:
+            rl_status = ctx.rate_limiter.status()
+            self.rate_limit_label.setText(
+                "<br>".join(
+                    f"&nbsp;&nbsp;{cat}: {s['recent_events']}/{s['limit']} per {s['window_seconds']:.0f}s"
+                    + (f" <span style='color:#ff6b6b'>({s['violations']} violation(s))</span>" if s["violations"] else "")
+                    for cat, s in rl_status.items()
+                ) or "(no categories configured)"
+            )
+        else:
+            self.rate_limit_label.setText("Rate limiter not configured.")
 
         self.dirs_label.setText("<br>".join(ctx.settings.indexed_roots) or "(none configured)")
 
@@ -209,6 +251,35 @@ class SecurityCenterWindow(QDialog):
     def _clear_lockouts(self) -> None:
         if self.ctx.security_monitor:
             self.ctx.security_monitor.clear_lockout()
+        self.refresh()
+
+    def _reset_rate_limits(self) -> None:
+        if self.ctx.rate_limiter:
+            self.ctx.rate_limiter.reset()
+        self.refresh()
+
+    def _toggle_lockdown(self) -> None:
+        ld = self.ctx.lockdown_manager
+        if ld is None:
+            return
+        if ld.is_locked_down():
+            reply = QMessageBox.question(
+                self, "Exit Lockdown",
+                "JARVIS is in LOCKDOWN mode. Exiting resumes normal operation immediately.\n\n"
+                "Only do this if you understand what triggered lockdown. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                ld.exit_lockdown(user_confirmed=True)
+        else:
+            reply = QMessageBox.question(
+                self, "Enter Lockdown",
+                "This immediately restricts JARVIS to read-only diagnostics only -- "
+                "no file access, no terminal, no automation -- until you explicitly exit. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                ld.enter_lockdown("Manually triggered from the Security Center")
         self.refresh()
 
     def _view_audit_log(self) -> None:

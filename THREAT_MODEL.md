@@ -411,6 +411,150 @@ direct-SQLite-edit tamper-detection test).
 
 ---
 
+## 17. External network attacker / unauthenticated exposure
+
+**Attack vector:** A remote attacker reaches JARVIS over the network — a
+listening HTTP/RPC endpoint with no auth, a service accidentally bound to
+`0.0.0.0` instead of `127.0.0.1`, or an IPC channel a second local process
+could connect to and issue commands through.
+
+**Preventive control:** N/A by construction, not by policy — this codebase
+has no listening socket, no HTTP server, no RPC endpoint, and no IPC
+channel of any kind. JARVIS is a single desktop process (PySide6 UI +
+in-process orchestrator + in-process tool calls); there is nothing for a
+remote or cross-process attacker to connect *to*. This is stated explicitly
+rather than left implied, per the spec's own instruction to be honest about
+what doesn't apply given the current architecture. If a network-facing
+control surface (a local API for a companion app, a plugin host, etc.) is
+ever added, it must bind to `127.0.0.1` only, require authentication on
+every request, and go through the same `PolicyEngine` as every other tool
+call — it must not become a second, unguarded path to tool execution.
+
+**Status:** Not applicable — no network-facing service exists. Documented
+here so this stays a conscious design constraint, not an oversight, if that
+ever changes.
+
+---
+
+## 18. IPC abuse
+
+**Attack vector:** A malicious local process sends crafted messages over an
+inter-process channel to make JARVIS execute actions on its behalf.
+
+**Preventive control:** N/A for the same reason as §17 — there is no IPC
+surface. The UI, orchestrator, and tools all run in one process and
+communicate via ordinary in-memory function calls and Qt signals, not a
+message channel another process could write to.
+
+**Status:** Not applicable — no IPC boundary exists in this architecture.
+
+---
+
+## 19. JARVIS being turned into an attack tool
+
+**Attack vector:** A compromised or jailbroken LLM tries to use JARVIS's
+own terminal access to run offensive-security tooling against a third
+party or the local network: port/network scanners (`nmap`, `masscan`,
+`zmap`), credential crackers (`hydra`, `medusa`, `hashcat`, `john`),
+exploit frameworks (`msfconsole`/`msfvenom`, `sqlmap`), Wi-Fi attack tools
+(`aircrack-ng` suite), packet/credential interception (`responder`,
+`bettercap`/`ettercap`, `mimikatz`, `lazagne`), lateral-movement tooling
+(`crackmapexec`, `evil-winrm`, `sharphound`/`bloodhound.py`), web scanners
+(`nikto`, `wpscan`), or a raw reverse shell via `nc -e`/`ncat --exec`.
+
+**Preventive control:** `jarvis/security/deny_list.py`'s
+`DENY_COMMAND_PATTERNS` matches these tools by name/flag regardless of
+target (localhost, an internal IP, or a real third party) — JARVIS refuses
+to run them at all rather than trying to distinguish "authorized pentest"
+from "attack" by argument inspection, which an LLM-generated command could
+trivially misrepresent. Line-continuation evasion (PowerShell backtick,
+cmd.exe caret) is normalized away first (`normalize_command()`) so a
+multi-line encoding of the same command can't dodge the pattern. This is a
+DENY, not a DESTRUCTIVE-requiring-approval — a human clicking "approve"
+does not unlock this category, since the point is that JARVIS itself must
+never be the thing running these tools, not that a person didn't consent.
+
+**Status:** Implemented and tested
+(`tests/test_deny_list_evasion.py`, `tests/test_not_an_attack_platform.py`
+— the latter directly encodes the spec's adversarial test phrases: "scan my
+local network", "open a reverse shell", "crack this password", etc., each
+asserted DENY end-to-end through the real `PolicyEngine`).
+
+---
+
+## 20. SSRF / malicious outbound network requests
+
+**Attack vector:** A tool that fetches a URL (web search, page fetch, API
+call) is pointed at an internal address instead — `localhost`, a private-IP
+target, a cloud metadata endpoint (`169.254.169.254`), or a numerically
+encoded IP literal (`http://2130706433/`, `http://127.1/`) designed to slip
+past a naive "does this look like an internal address" string check.
+
+**Preventive control:** `jarvis/security/network_policy.py`'s
+`is_safe_public_url()` — scheme allowlist (http/https only), rejects
+embedded credentials, blocks loopback/private/link-local/reserved/
+multicast ranges and named metadata hosts both pre- and post-DNS-resolution
+(defending against DNS rebinding, where the hostname resolves safely at
+check time but differently at connect time), and detects the legacy BSD
+`inet_aton` numeric-literal encodings (decimal/hex/octal/shorthand-dotted)
+that a permissive resolver would still parse as an internal address.
+`revalidate_redirect()` makes explicit that every redirect hop must be
+re-checked, not just the initial URL.
+
+**Status:** Built and independently tested
+(`tests/test_network_policy.py`), but **not wired to any tool** — there is
+no web-fetch capability in this codebase yet (same gap noted in §3 and the
+summary below). This module exists so that whenever such a capability is
+added, it starts from a validated SSRF defense instead of retrofitting one
+afterward; today it has zero effect on JARVIS's behavior.
+
+---
+
+## 21. Compromised-JARVIS containment: LOCKDOWN mode, rate limiting, abnormal behavior
+
+**Attack vector:** Rather than one bad command, the LLM (or a bug) drives
+sustained abusive behavior: rapid-fire tool calls, repeated denied actions
+probing for a policy gap, or chaining many marginal actions fast enough
+that no single one looks alarming in isolation.
+
+**Preventive control:** Three independent, composable layers:
+- **Rate limiting** (`jarvis/security/rate_limiter.py`) — time-windowed
+  caps per category (`user_message`, `tool_execution`, `llm_request`),
+  checked in `PolicyEngine._evaluate` and `Orchestrator.handle_message`
+  before any LLM call or tool execution happens. Repeated violations
+  progressively tighten the effective limit rather than just repeating the
+  same cap.
+- **Behavioral anomaly monitoring** (`jarvis/security/monitor.py`) — a
+  `SecurityMonitor` observing every policy decision; a burst of denials
+  against the same tool triggers a temporary per-tool lockout
+  independently of the rate limiter.
+- **LOCKDOWN state machine** (`jarvis/security/lockdown.py`) — a
+  `LockdownManager` with three states, `NORMAL` → `SUSPICIOUS` →
+  `LOCKDOWN`. `SecurityMonitor.observe()` reports every alert to it;
+  repeated suspicious marks within a short window auto-escalate to
+  LOCKDOWN. Once in LOCKDOWN, `PolicyEngine._evaluate` denies every tool
+  except a fixed allowlist of read-only diagnostics
+  (`LOCKDOWN_ALLOWED_TOOLS` — CPU/memory/disk/battery/network status,
+  nothing that touches the filesystem, terminal, or network). The only way
+  out is `exit_lockdown(user_confirmed=True)` — there is no code path for
+  JARVIS to exit LOCKDOWN on its own, by design; a person must confirm it
+  from the Security Center.
+
+The Security Center UI (`jarvis/ui/security_center.py`) surfaces live
+LOCKDOWN state and rate-limit usage per category, and lets a person
+manually force LOCKDOWN (e.g. on suspicion even before automatic
+escalation triggers) or reset rate limits, all calling straight through to
+the same backend objects the policy engine reads — the dashboard is a view
+onto real state, not a separate claim about it.
+
+**Status:** Implemented and tested (`tests/test_lockdown.py`,
+`tests/test_rate_limiter.py`, `tests/test_security_monitor.py`,
+`tests/test_security_center.py`), including integration tests that drive
+LOCKDOWN through the real `PolicyEngine` and confirm the allowlist holds
+and that only a confirmed human action clears it.
+
+---
+
 ## Summary: what's genuinely open
 
 Read honestly, not every threat in this document is closed:
@@ -436,3 +580,12 @@ Read honestly, not every threat in this document is closed:
    the OS itself. This matches the spec's own "where practical" framing for
    this control but is worth stating plainly rather than implying full
    containment.
+6. **§20 SSRF defense** — `network_policy.py` is built and tested but not
+   wired to any tool, because no tool fetches a URL yet. Same shape of gap
+   as #1 above: scoped out because the capability it defends doesn't exist,
+   not forgotten.
+7. **§17/§18 network exposure and IPC** — genuinely not applicable today
+   (no listening service, no IPC channel), not just unimplemented. Listed
+   as open only in the sense that if either is ever added, its auth and
+   policy-engine integration has to be designed in from the start, not
+   bolted on.
