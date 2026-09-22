@@ -20,13 +20,21 @@ from typing import Any
 
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),                              # OpenAI/Anthropic-style API keys
+    re.compile(r"sk_(live|test)_[a-zA-Z0-9]{16,}"),                   # Stripe secret keys (underscore, not hyphen -- found by testing: the sk- pattern above requires a literal hyphen and never matched these)
+    re.compile(r"(?:pk|rk)_(live|test)_[a-zA-Z0-9]{16,}"),            # Stripe publishable/restricted keys
     re.compile(r"AKIA[0-9A-Z]{16}"),                                  # AWS access key id
     re.compile(r"ghp_[a-zA-Z0-9]{30,}"),                              # GitHub personal access token
     re.compile(r"gho_[a-zA-Z0-9]{30,}"),                              # GitHub OAuth token
     re.compile(r"xox[baprs]-[a-zA-Z0-9-]{10,}"),                      # Slack tokens
     re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}"),  # JWT
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(api[_-]?key|password|secret|token|access[_-]?key)\s*[:=]\s*['\"]?[^\s'\"]{8,}"),
+    # [\w-]* between the keyword and the separator -- found by testing:
+    # requiring the separator immediately after the keyword missed the
+    # overwhelmingly common env-var/config shape where the keyword is only
+    # part of a longer identifier ("MY_API_KEY_VALUE=...",
+    # "the_token_variable_name_is: ..." -- "token" is a substring of the
+    # identifier, joined to the rest by underscores, which are \w).
+    re.compile(r"(?i)(api[_-]?key|password|secret|token|access[_-]?key)[\w-]*\s*[:=]\s*['\"]?[^\s'\"]{8,}"),
     re.compile(r"(?i)(postgres|postgresql|mysql|mongodb|redis)://[^\s'\"]*:[^\s'\"@]*@[^\s'\"]+"),  # DB connection strings with embedded creds
 )
 

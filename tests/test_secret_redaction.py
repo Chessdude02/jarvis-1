@@ -33,6 +33,45 @@ def test_normal_text_is_untouched():
     assert redact(text) == text
 
 
+# -- Gaps found by attack-simulation testing ---------------------------------
+
+def test_redact_stripe_keys():
+    # Stripe uses an underscore (sk_live_/sk_test_), not the hyphen the
+    # OpenAI/Anthropic-style "sk-" pattern requires -- found by testing:
+    # a real Stripe secret key sailed through completely unredacted.
+    for text in (
+        # Low-entropy placeholders (not shaped like a real issued key) --
+        # only need to satisfy the pattern's own character-class/length
+        # requirement, not look like a real credential.
+        "stripe_key=sk_live_0000000000000000",
+        "STRIPE_SECRET=sk_test_0000000000000000",
+        "publishable=pk_test_0000000000000000",
+    ):
+        assert "[REDACTED]" in redact(text), text
+
+
+def test_redact_keyword_embedded_in_a_longer_identifier():
+    # The generic api_key/password/secret/token pattern used to require the
+    # ":"/"=" separator IMMEDIATELY after the bare keyword -- found by
+    # testing: the overwhelmingly common env-var/config shape, where the
+    # keyword is only part of a longer underscore-joined identifier, evaded
+    # it entirely ("MY_API_KEY_VALUE=...", "the_token_variable_name_is:...").
+    for text in (
+        "my_api_key_value = 'abcd1234efgh5678'",
+        "the_token_variable_name_is: abcd1234wxyz5678",
+        "DATABASE_PASSWORD_HASH=SuperSecretPass123456",
+    ):
+        assert "[REDACTED]" in redact(text), text
+
+
+def test_redact_keyword_fix_does_not_false_positive_on_ordinary_prose():
+    for text in (
+        "primary key constraint violation on table users",
+        "git commit -m 'update password reset flow'",
+    ):
+        assert redact(text) == text, text
+
+
 def test_contains_secret_detector():
     assert contains_secret("token: abcdefghijklmnop") is True
     assert contains_secret("just a normal sentence") is False
