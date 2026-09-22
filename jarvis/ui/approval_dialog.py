@@ -54,11 +54,43 @@ class ApprovalDialog(QDialog):
             layout.addWidget(QLabel(f"Location:\n{location}", self))
 
         if request.command:
+            # Found by testing: a fixed 50px box needs a scrollbar for any
+            # command longer than ~2 short lines -- confirmed with a
+            # realistic 253-char chained command whose dangerous "rm -rf"
+            # suffix sat well past the fold, invisible without actively
+            # scrolling a small, easy-to-miss box. That directly undermines
+            # this dialog's own stated purpose ("the exact command, never a
+            # vague 'I'll take care of it'"): a user glancing at the
+            # visible prefix and approving would never see the payload.
+            # Sized to the actual content instead, up to a generous cap --
+            # short commands (the overwhelming majority) show in full with
+            # no wasted space; a command still too long for the cap gets an
+            # explicit, hard-to-miss warning rather than a bare scrollbar.
             cmd_box = QTextEdit(self)
             cmd_box.setReadOnly(True)
-            cmd_box.setFixedHeight(50)
             cmd_box.setText(request.command)
+            _MAX_CMD_BOX_HEIGHT = 220
+            _MIN_CMD_BOX_HEIGHT = 40
+            # The box isn't laid out yet at __init__ time, so its document
+            # would otherwise measure word-wrap against a stale/default
+            # width and under-report how tall the content actually needs to
+            # be (found by testing: this returned the same tiny height for
+            # a 10-char and a 2000-char command alike). The dialog itself is
+            # a fixed width, so the eventual content width is already known
+            # -- set it explicitly before measuring.
+            content_width = self.width() - 40
+            cmd_box.document().setTextWidth(content_width)
+            content_height = int(cmd_box.document().size().height()) + 12
+            cmd_box.setFixedHeight(max(_MIN_CMD_BOX_HEIGHT, min(content_height, _MAX_CMD_BOX_HEIGHT)))
             layout.addWidget(cmd_box)
+            if content_height > _MAX_CMD_BOX_HEIGHT:
+                overflow_warning = QLabel(
+                    "⚠ This command is longer than fits above -- scroll the box to review it in full before approving.",
+                    self,
+                )
+                overflow_warning.setStyleSheet("color: #ffb347; font-weight: bold;")
+                overflow_warning.setWordWrap(True)
+                layout.addWidget(overflow_warning)
 
         risk_color = _RISK_COLORS.get(decision.risk.value, "#e6ecf5")
         risk_label = QLabel(f"Risk: <span style='color:{risk_color}'>{decision.risk.value}</span> ({decision.category.value})", self)
