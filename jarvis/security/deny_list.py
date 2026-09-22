@@ -68,6 +68,8 @@ DENY_PATH_FRAGMENTS: tuple[str, ...] = (
     "netskope", "\\authy",
     ".npmrc", ".pypirc",  # commonly hold registry auth tokens
     "\\windows\\system32\\config",  # SAM/SYSTEM hives
+    "/etc/shadow", "/etc/gshadow",  # Linux password/group hashes
+    "/library/keychains/", "login.keychain",  # macOS Keychain
 )
 
 # --- 3. Shell-command patterns that mean a denied category, independent of --
@@ -199,6 +201,25 @@ def denied_command(command: str) -> str | None:
     for pattern in ATTACK_TOOL_PATTERNS:
         if pattern.search(deobfuscated):
             return f"Command matches a denied attack-tool pattern ({pattern.pattern})."
+    # Found by testing: execute_command's build_request() only ever puts
+    # `cwd` into request.paths -- a credential path referenced as an
+    # ARGUMENT inside the command string itself ("cat ~/.ssh/id_rsa", "type
+    # C:\Users\bob\.ssh\id_rsa", "get-content ...\Cookies") was never run
+    # through denied_path() at all, and cat/type/get-content all classify
+    # as a READ prefix -- confirmed via the real PolicyEngine: all of the
+    # above evaluated to ALLOW with zero confirmation, fully bypassing
+    # DENY_PATH_FRAGMENTS despite it being built specifically to stop this.
+    # denied_path()'s substring check works the same whether it's handed an
+    # isolated path or a whole command line, so reusing it here (rather
+    # than trying to parse out every possible path-argument position across
+    # every shell/tool's argument syntax) closes the bypass uniformly for
+    # cat/type/get-content/less/head/tail/python -c "open(...)"/etc. at
+    # once, independent of is_command_tool or category resolution (this
+    # function is also called directly from step 1e of
+    # PolicyEngine._evaluate, unconditionally).
+    path_reason = denied_path(normalized)
+    if path_reason:
+        return f"Command references a credential/security-sensitive location: {path_reason}"
     return None
 
 
