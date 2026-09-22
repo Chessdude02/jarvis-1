@@ -221,3 +221,57 @@ def test_session_grant_avoids_repeated_approval_within_session(settings, registr
     # Second identical action should be covered by the session grant from the
     # first turn and not prompt for approval a second time.
     assert len(approval_calls) == 1
+
+
+def test_unknown_tool_call_is_audited_and_denied(settings, registry, policy_engine, sandbox, audit_log, memory):
+    # A hallucinated/garbage tool name must produce the same DENY as before,
+    # but by actually going through policy_engine.evaluate() rather than a
+    # hand-built decision that skipped it entirely -- found by testing:
+    # the old shortcut in _evaluate_call() left NO audit row at all for
+    # this path, silently defeating the append-only audit trail for the
+    # exact case (an LLM calling tools that don't exist) the audit log
+    # exists to catch.
+    def fake_chat(messages, tools=None):
+        if not fake_chat.called:
+            fake_chat.called = True
+            return ChatResponse(content="", tool_calls=[ToolCall(id="1", name="totally_made_up_tool_xyz", arguments={})])
+        return ChatResponse(content="can't do that", tool_calls=[])
+    fake_chat.called = False
+
+    orch = make_orchestrator(settings, registry, policy_engine, sandbox, audit_log, memory)
+    orch.llm.chat = fake_chat
+
+    events = list(orch.handle_message("call a tool that doesn't exist"))
+    tool_results = [e.payload for e in events if e.type == "tool_result"]
+    assert any(r["success"] is False for r in tool_results)
+
+    rows = list(audit_log.iter_events())
+    assert any(
+        r.event_type == "policy_decision" and r.data.get("tool") == "totally_made_up_tool_xyz"
+        for r in rows
+    )
+
+
+def test_repeated_unknown_tool_calls_trigger_security_monitor_lockout(settings, registry, sandbox, audit_log, memory):
+    from jarvis.security.monitor import SecurityMonitor
+    from jarvis.security.policy_engine import PolicyEngine
+
+    monitor = SecurityMonitor(audit_sink=audit_log, blocked_tool_threshold=2)
+    engine = PolicyEngine(settings, registry.policy_specs(), audit_sink=audit_log, security_monitor=monitor)
+
+    n = {"i": 0}
+
+    def fake_chat(messages, tools=None):
+        n["i"] += 1
+        if n["i"] <= 3:
+            return ChatResponse(content="", tool_calls=[ToolCall(id=str(n["i"]), name="hallucinated_tool", arguments={})])
+        return ChatResponse(content="giving up", tool_calls=[])
+
+    orch = make_orchestrator(settings, registry, engine, sandbox, audit_log, memory)
+    orch.llm.chat = fake_chat
+
+    list(orch.handle_message("keep calling a tool that doesn't exist"))
+    # blocked_tool_threshold=2: the 2nd+ denial of the SAME unknown tool name
+    # must trip SecurityMonitor's per-tool lockout -- this never happened
+    # before the fix, since unknown-tool denials never reached observe().
+    assert "hallucinated_tool" in monitor.active_lockouts()

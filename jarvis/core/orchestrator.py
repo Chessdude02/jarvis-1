@@ -182,9 +182,35 @@ class Orchestrator:
 
                     tool = self.registry.get(tool_call.name)
                     if tool is None:
-                        result = {"success": False, "error": f"Unknown tool '{tool_call.name}'."}
-                        yield OrchestratorEvent("tool_result", result)
-                        messages.append(self._tool_result_message(tool_call, result))
+                        # Route through policy_engine.evaluate() rather than a
+                        # hand-built result here -- PolicyEngine.tool_registry
+                        # is built from this same registry (registry.py's
+                        # module docstring), so _resolve_category already
+                        # denies an unregistered name on its own. Short-
+                        # circuiting used to skip evaluate() for this one
+                        # path, which meant a flood of hallucinated/garbage
+                        # tool names -- the actual per-call path every tool
+                        # call in this loop goes through, not just the
+                        # multi-call plan preview above -- left no audit row,
+                        # never fed SecurityMonitor's denial-pattern/lockout
+                        # detection, and wasn't counted against the
+                        # tool_execution rate limit. Found by testing: a
+                        # jailbroken LLM spamming nonexistent tool names could
+                        # do so indefinitely without ever tripping the
+                        # anomaly monitor or LOCKDOWN escalation built
+                        # specifically for that scenario.
+                        request = ActionRequest(
+                            tool_name=tool_call.name, args=tool_call.arguments,
+                            description=f"Unknown tool '{tool_call.name}'.",
+                        )
+                        decision = self.policy_engine.evaluate(request)
+                        yield OrchestratorEvent("tool_call", {"tool": tool_call.name, "args": tool_call.arguments, "decision": decision})
+                        outcome = self._handle_decision(None, tool_call.arguments, request, decision)
+                        for event in outcome.events:
+                            yield event
+                        if outcome.executed:
+                            commands_this_turn += 1
+                        messages.append(self._tool_result_message(tool_call, outcome.result_dict))
                         continue
 
                     if not isinstance(tool_call.arguments, dict):
@@ -252,11 +278,18 @@ class Orchestrator:
         return {"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result, default=str)[:6000]}
 
     def _evaluate_call(self, tool_call: ToolCall) -> tuple[ActionRequest, PolicyDecision]:
+        """Only used to build the multi-call plan preview shown to the UI
+        (handle_message, when a single LLM response contains more than one
+        tool call) -- NOT the per-call execution decision, which the main
+        loop below makes for itself via policy_engine.evaluate() directly.
+        Kept consistent with that loop's own unknown-tool handling (route
+        through evaluate() rather than a hand-built decision) so the plan
+        preview and the actual per-call audit/monitoring agree.
+        """
         tool = self.registry.get(tool_call.name)
         if tool is None:
-            req = ActionRequest(tool_name=tool_call.name, args=tool_call.arguments, description=f"Unknown tool {tool_call.name}")
-            from jarvis.security.permissions import PermissionLevel, RiskLevel
-            return req, PolicyDecision(Decision.DENY, PermissionLevel.DENY, RiskLevel.CRITICAL, ["Unknown tool."], absolute=True)
+            req = ActionRequest(tool_name=tool_call.name, args=tool_call.arguments, description=f"Unknown tool '{tool_call.name}'.")
+            return req, self.policy_engine.evaluate(req)
         req = tool.build_request(tool_call.arguments)
         return req, self.policy_engine.evaluate(req)
 
