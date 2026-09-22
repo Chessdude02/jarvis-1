@@ -162,16 +162,33 @@ class Sandbox:
         out_chunks: list[str] = []
         err_chunks: list[str] = []
         truncated = {"flag": False}
+        # Read in bounded chunks, not by line. pipe.readline() blocks and
+        # keeps growing its internal buffer until it sees a newline OR EOF
+        # -- a process that writes megabytes/gigabytes with no '\n' at all
+        # (or one very long line) never gives readline() a chance to
+        # return, so the "total > max_bytes" check below never runs until
+        # everything already accumulated in memory as ONE giant "line".
+        # Found by testing: with max_output_bytes set to 1KB, a command
+        # that wrote large chunks with no newline pushed this process's RSS
+        # up by ~700MB before truncation ever kicked in -- a real memory-
+        # exhaustion DoS via the exact limit meant to prevent it. read(n)
+        # returns as soon as up to n characters are available, regardless
+        # of newlines, so the size check now runs at bounded intervals no
+        # matter what the child writes.
+        _READ_CHUNK_CHARS = 65536
 
         def _drain(pipe, sink: list[str]) -> None:
             total = 0
-            for line in iter(pipe.readline, ""):
-                total += len(line.encode("utf-8", errors="ignore"))
+            while True:
+                chunk = pipe.read(_READ_CHUNK_CHARS)
+                if not chunk:
+                    break
+                total += len(chunk.encode("utf-8", errors="ignore"))
                 if total > max_bytes:
                     truncated["flag"] = True
                     _kill_tree(proc)
                     break
-                sink.append(line)
+                sink.append(chunk)
             pipe.close()
 
         t_out = threading.Thread(target=_drain, args=(proc.stdout, out_chunks), daemon=True)

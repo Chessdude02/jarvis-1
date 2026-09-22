@@ -59,6 +59,36 @@ def test_output_is_truncated_at_configured_limit(settings, tmp_path):
     assert len(result.stdout.encode("utf-8")) < 100_000
 
 
+def test_output_with_no_newlines_is_still_bounded_in_memory(settings, tmp_path):
+    # Regression test for a real memory-exhaustion DoS: pipe.readline()
+    # blocks and keeps growing its own internal buffer until it sees a
+    # newline OR EOF, so a process that writes large chunks with NO '\n'
+    # at all never gave readline() a chance to return -- the
+    # "total > max_bytes" truncation check never ran until the process was
+    # finally killed by the (separate) timeout, by which point everything
+    # written had already accumulated in memory as one giant "line".
+    # Found by testing: with max_output_bytes=1000, this command pushed
+    # RSS up by ~700MB before truncation kicked in. Must now be caught
+    # almost immediately, well before the timeout, via bounded chunk reads.
+    import resource
+
+    from jarvis.security.sandbox import Sandbox
+
+    settings.limits.max_output_bytes = 1000
+    settings.limits.max_command_execution_seconds = 3
+    sandbox = Sandbox(settings)
+
+    mem_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    cmd = "python3 -c \"import sys; [sys.stdout.write('A'*1000000) for _ in range(1000)]\""
+    result = sandbox.run(cmd, str(tmp_path))
+    mem_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    assert result.truncated is True
+    assert result.timed_out is False  # caught by the size check, not the timeout
+    assert result.duration_seconds < 1.0  # truncated almost immediately, not after the full timeout
+    assert (mem_after - mem_before) < 50 * 1024  # well under 50MB growth, not ~700MB
+
+
 def test_subprocess_count_limit_refuses_extra_commands(settings, tmp_path):
     from jarvis.security.sandbox import Sandbox
     import threading
