@@ -76,3 +76,60 @@ def test_legitimate_commands_still_classify_correctly_after_normalization():
     assert classify_command("git status").category == PermissionLevel.READ
     assert classify_command("pip install requests").category == PermissionLevel.MODIFY
     assert classify_command("npm install express").category == PermissionLevel.MODIFY
+
+
+# -- quote-splitting / backslash-escape evasion of attack-tool patterns -----
+# bash (and cmd.exe/PowerShell, differently) parse an empty adjacent quote
+# pair or a backslash before an ordinary character as pure syntax with zero
+# effect on the resulting word -- n\map, n''map, and n""map are all just
+# "nmap" to a real shell. Verified directly:
+#   bash -c "echo n\map --version"  -> prints "nmap --version"
+#   bash -c "echo n''map --version" -> prints "nmap --version"
+# A regex written as \bnmap\b does not match the literal substring "n\map"
+# or "n''map", so this evaded ATTACK_TOOL_PATTERNS before
+# _deobfuscate_for_attack_tool_matching was added. Confirmed via
+# classify_command() before the fix: these commands fell through to the
+# generic "unknown command shape" DESTRUCTIVE default (CONFIRM-gated)
+# instead of the absolute DENY the spec requires for attack tooling.
+
+def test_backslash_escaped_attack_tool_name_denied():
+    assert deny_list.denied_command("n\\map -sV 192.168.1.0/24") is not None
+    assert deny_list.denied_command("hy\\dra -l admin -P wordlist.txt ssh://target") is not None
+    assert deny_list.denied_command("mimi\\katz") is not None
+    assert classify_command("n\\map -sV 192.168.1.0/24").denied is True
+
+
+def test_empty_single_quote_split_attack_tool_name_denied():
+    assert deny_list.denied_command("n''map -sV 192.168.1.0/24") is not None
+    assert deny_list.denied_command("hy''dra -l admin -P wordlist.txt ssh://target") is not None
+    assert deny_list.denied_command("hash''cat -m 0 hash.txt wordlist.txt") is not None
+    assert classify_command("n''map -sV 192.168.1.0/24").denied is True
+
+
+def test_empty_double_quote_split_attack_tool_name_denied():
+    assert deny_list.denied_command('n""map -sV 192.168.1.0/24') is not None
+    assert deny_list.denied_command('sql""map -u "http://target/page?id=1"') is not None
+
+
+def test_repeated_backslash_letter_spam_denied():
+    assert deny_list.denied_command("n\\m\\a\\p -sV 192.168.1.0/24") is not None
+
+
+def test_deobfuscation_does_not_false_positive_legit_windows_paths():
+    # A single real backslash in an ordinary path reference must not be
+    # treated as attack-tool obfuscation -- these are DESTRUCTIVE (system
+    # directory reference / unknown shape) at worst, never an attack-tool
+    # DENY, since none of the attack-tool names appear in them at all.
+    for cmd in ("cd C:\\Windows\\System32", "dir C:\\Users\\test\\Documents"):
+        result = classify_command(cmd)
+        assert not (result.denied and "attack-tool pattern" in " ".join(result.reasons)), cmd
+
+
+def test_deobfuscation_does_not_break_existing_backslash_dependent_deny_pattern():
+    # new-itemproperty ... \policies\ must still be denied via its own
+    # DENY_COMMAND_PATTERNS entry, which legitimately depends on a literal
+    # backslash -- the new deobfuscation path is additive (a second check
+    # against ATTACK_TOOL_PATTERNS only) and must not replace or weaken it.
+    assert deny_list.denied_command(
+        "New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft' -Name Foo"
+    ) is not None

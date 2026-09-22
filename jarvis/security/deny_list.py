@@ -95,14 +95,28 @@ DENY_COMMAND_PATTERNS: tuple[re.Pattern, ...] = tuple(re.compile(p, re.IGNORECAS
     r"invoke-webrequest.*\|\s*iex\b",
     r"-enc(odedcommand)?\s+[a-z0-9+/=]{40,}",  # obfuscated/base64 PowerShell
 
-    # --- "JARVIS must not become an attack tool" (network/credential/exploit
-    # tooling). These are outright denied, not merely gated as DESTRUCTIVE --
-    # per the spec, a network scanner, credential cracker, or exploit runner
-    # "must not exist in the normal JARVIS toolset" at all, which is a
-    # stronger bar than "requires approval". Anchored to the actual binary
-    # names/argument styles of real tools, not generic words, to avoid
-    # false-positiving on unrelated commands (e.g. "john" alone is a common
-    # name, so it's paired with John the Ripper's own flag style below).
+))
+
+# --- "JARVIS must not become an attack tool" (network/credential/exploit
+# tooling). These are outright denied, not merely gated as DESTRUCTIVE --
+# per the spec, a network scanner, credential cracker, or exploit runner
+# "must not exist in the normal JARVIS toolset" at all, which is a
+# stronger bar than "requires approval". Anchored to the actual binary
+# names/argument styles of real tools, not generic words, to avoid
+# false-positiving on unrelated commands (e.g. "john" alone is a common
+# name, so it's paired with John the Ripper's own flag style below).
+#
+# Kept in a separate tuple from DENY_COMMAND_PATTERNS and matched against
+# an aggressively deobfuscated form of the command (see
+# _deobfuscate_for_attack_tool_matching below) -- unlike the
+# security-control patterns above, none of these need a literal backslash
+# or quote character to match, so it's safe to strip those wholesale here
+# to close the classic shell defense-evasion trick of inserting an escaped
+# character or an empty quote pair mid-word ("n\map", "n''map", "hy\dra")
+# to break up a \bword\b regex without changing what a real shell executes
+# (verified: bash parses both n\map and n''map as the literal command
+# "nmap"). Found by testing this exact evasion against the patterns below.
+ATTACK_TOOL_PATTERNS: tuple[re.Pattern, ...] = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"\bnmap\b",
     r"\bmasscan\b",
     r"\bzmap\b",
@@ -146,6 +160,20 @@ def normalize_command(command: str) -> str:
     return _LINE_CONTINUATION.sub(" ", command)
 
 
+# Every quote character and backslash, stripped wholesale. Only used for
+# matching ATTACK_TOOL_PATTERNS (see comment above that tuple) -- unlike
+# normalize_command(), this is deliberately NOT applied ahead of the other
+# DENY_COMMAND_PATTERNS or command_validator's destructive-pattern list,
+# several of which rely on a literal backslash to match a Windows path
+# fragment (e.g. "\\policies\\"); stripping backslashes there would
+# regress those checks instead of strengthening them.
+_QUOTE_AND_BACKSLASH = re.compile(r"['\"\\]")
+
+
+def _deobfuscate_for_attack_tool_matching(command: str) -> str:
+    return _QUOTE_AND_BACKSLASH.sub("", command)
+
+
 def denied_tool(tool_name: str) -> str | None:
     if tool_name in ABSOLUTE_DENY_TOOLS:
         return f"'{tool_name}' is on the absolute deny list and is never executable."
@@ -167,6 +195,10 @@ def denied_command(command: str) -> str | None:
     for pattern in DENY_COMMAND_PATTERNS:
         if pattern.search(normalized):
             return f"Command matches a denied security-control pattern ({pattern.pattern})."
+    deobfuscated = _deobfuscate_for_attack_tool_matching(normalized)
+    for pattern in ATTACK_TOOL_PATTERNS:
+        if pattern.search(deobfuscated):
+            return f"Command matches a denied attack-tool pattern ({pattern.pattern})."
     return None
 
 
