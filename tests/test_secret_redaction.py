@@ -72,6 +72,22 @@ def test_redact_keyword_fix_does_not_false_positive_on_ordinary_prose():
         assert redact(text) == text, text
 
 
+def test_ansi_escape_split_secret_is_still_redacted():
+    # A raw ANSI escape sequence inserted mid-secret ("sk-abc\x1b[0mdefgh...")
+    # broke the character run at the codepoint level the same way a
+    # backslash or empty-quote pair broke an attack-tool name -- found by
+    # testing. Command output routinely carries real ANSI color codes from
+    # build tools, so this is not a contrived shape.
+    split_secret = "sk-abc\x1b[0mdefghijklmnopqrstuvwx1234"
+    assert "[REDACTED]" in redact(split_secret)
+    assert contains_secret(split_secret) is True
+
+
+def test_ansi_codes_are_stripped_from_ordinary_colorized_output():
+    colorized = "\x1b[31mERROR\x1b[0m: build failed normally"
+    assert redact(colorized) == "ERROR: build failed normally"
+
+
 def test_contains_secret_detector():
     assert contains_secret("token: abcdefghijklmnop") is True
     assert contains_secret("just a normal sentence") is False

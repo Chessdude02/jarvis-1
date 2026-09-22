@@ -18,6 +18,18 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Strips ANSI/terminal escape sequences (CSI color/cursor codes, OSC window-
+# title codes, and the simpler single-character escapes) before any secret
+# pattern runs. Two reasons: command output routinely carries these from
+# colorized build-tool/CLI output, so stripping them keeps the audit log
+# and chat display readable either way; and, found by testing, a secret
+# with an escape sequence inserted mid-string ("sk-abc\x1b[0mdefghi...")
+# evaded every character-class-based pattern below the same way a
+# backslash or empty-quote pair evaded the attack-tool deny patterns --
+# the character run is broken at the codepoint level even though a real
+# terminal would render it as one contiguous, unstyled string.
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Za-z0-9]|[@-Z\\-_])")
+
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),                              # OpenAI/Anthropic-style API keys
     re.compile(r"sk_(live|test)_[a-zA-Z0-9]{16,}"),                   # Stripe secret keys (underscore, not hyphen -- found by testing: the sk- pattern above requires a literal hyphen and never matched these)
@@ -42,13 +54,17 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 def redact(text: str) -> str:
     if not text:
         return text
+    text = _ANSI_ESCAPE.sub("", text)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text
 
 
 def contains_secret(text: str) -> bool:
-    return bool(text) and any(p.search(text) for p in _SECRET_PATTERNS)
+    if not text:
+        return False
+    text = _ANSI_ESCAPE.sub("", text)
+    return any(p.search(text) for p in _SECRET_PATTERNS)
 
 
 def redact_value(value: Any) -> Any:
