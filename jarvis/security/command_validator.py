@@ -260,3 +260,29 @@ def classify_command(command: str, cwd: str | None = None) -> CommandClassificat
         ["Command does not match a known read-only or routine-modify pattern; treated as high-risk by default."],
         reversibility=Reversibility.UNKNOWN,
     )
+
+
+def grant_scope_for_command(command: str) -> str:
+    """The routine-action 'family' a command belongs to, for grant-key
+    purposes -- i.e. what a SESSION/ALWAYS approval should be scoped to.
+    Deliberately the exact granularity of _MODIFY_PREFIXES itself, since
+    each entry there is already a curated routine-action family: "git add",
+    "git commit", "git fetch", and "git stash" are different operations
+    with different consequences even though they share "git" as their
+    first token. Found by testing: the grant_key ExecuteCommandTool used
+    to build from command.split()[0] alone collapsed ALL git subcommands
+    (and all pip/npm subcommands) into one grant -- approving "git add
+    file.py" once with SESSION scope silently covered "git fetch", "git
+    stash", "git tag", and "git commit" afterward too, none of which the
+    user ever saw. Falls back to the first whitespace token for a command
+    that doesn't match any curated prefix; that fallback's coarseness has
+    no bypass consequence since such a command is always DESTRUCTIVE/
+    CONFIRM-every-time regardless of any grant (PolicyEngine._evaluate's
+    own "no grant covers DESTRUCTIVE" rule).
+    """
+    lowered = command.strip().lower()
+    for prefix in _MODIFY_PREFIXES:
+        if _matches_prefix(lowered, prefix):
+            return prefix.strip()
+    tokens = command.split()
+    return tokens[0] if tokens else ""

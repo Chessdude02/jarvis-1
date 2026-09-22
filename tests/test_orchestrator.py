@@ -275,3 +275,41 @@ def test_repeated_unknown_tool_calls_trigger_security_monitor_lockout(settings, 
     # must trip SecurityMonitor's per-tool lockout -- this never happened
     # before the fix, since unknown-tool denials never reached observe().
     assert "hallucinated_tool" in monitor.active_lockouts()
+
+
+def test_session_grant_does_not_leak_across_different_git_subcommands(settings, registry, policy_engine, sandbox, audit_log, memory):
+    # Regression test for a real scope-creep bug: approving "git add" with
+    # SESSION scope must not silently also approve "git fetch"/"git stash"/
+    # "git commit" -- different operations that merely share "git" as their
+    # first token. Confirmed via the real orchestrator/policy engine before
+    # the fix: all three were silently ALLOWed after one "git add" approval.
+    project = settings.indexed_roots[0]
+    approval_calls = []
+    turns = ["git add file.py", "git fetch", "git stash", "git commit -m msg"]
+    state = {"turn": 0}
+
+    def fake_chat(messages, tools=None):
+        # memory only carries "user"/"assistant" roles across separate
+        # handle_message() calls, not "tool" -- so within THIS turn's local
+        # messages, any "tool" role present means the proposed call's
+        # result already came back and it's time to wrap up.
+        if any(m.get("role") == "tool" for m in messages):
+            return ChatResponse(content="done", tool_calls=[])
+        cmd = turns[state["turn"]]
+        return ChatResponse(content="", tool_calls=[ToolCall(id=str(state["turn"]), name="execute_command", arguments={"command": cmd, "cwd": project})])
+
+    def approve_session_once(request, decision):
+        approval_calls.append(request.command)
+        return ApprovalScope.SESSION
+
+    orch = make_orchestrator(settings, registry, policy_engine, sandbox, audit_log, memory, approve_session_once)
+    orch.llm.chat = fake_chat
+
+    for i in range(len(turns)):
+        state["turn"] = i
+        list(orch.handle_message("do the next git step"))
+
+    # Every distinct subcommand must have prompted for its own approval --
+    # none of the later three should have been silently covered by the
+    # first "git add" grant.
+    assert approval_calls == turns

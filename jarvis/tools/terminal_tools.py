@@ -6,7 +6,7 @@ actually is, not on trusting the LLM's framing of it.
 """
 from __future__ import annotations
 
-from jarvis.security.command_validator import classify_command
+from jarvis.security.command_validator import classify_command, grant_scope_for_command
 from jarvis.security.permissions import PermissionLevel
 from jarvis.security.secrets import redact
 from jarvis.tools import path_guard
@@ -69,7 +69,12 @@ class ExecuteCommandTool(Tool):
         req.cwd = raw_cwd if isinstance(raw_cwd, str) else ""
         req.paths = [req.cwd]
         req.description = f"Run `{req.command}` in {req.cwd}"
-        req.grant_key = f"execute_command:{req.command.split()[0] if req.command else ''}:{req.cwd}"
+        # grant_scope_for_command() returns the routine-action family (e.g.
+        # "git add", not just "git") -- see its docstring for why a bare
+        # first-token key was a real scope-creep bug: it let approving one
+        # git/pip/npm subcommand silently cover a different, unreviewed one
+        # for the rest of the session.
+        req.grant_key = f"execute_command:{grant_scope_for_command(req.command) if req.command else ''}:{req.cwd}"
         return req
 
     def execute(self, args, context: ToolContext) -> ToolResult:

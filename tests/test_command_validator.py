@@ -221,3 +221,39 @@ def test_ordinary_file_reads_are_unaffected_by_credential_path_check():
         result = classify_command(cmd)
         assert not result.denied, cmd
         assert result.category == PermissionLevel.READ, cmd
+
+
+# ============================================================================
+# Grant scoping: a SESSION/ALWAYS approval must be scoped to the specific
+# routine-action family the user actually approved, not to "any command
+# starting with the same program name". Found by testing: ExecuteCommandTool
+# used to build its grant_key from command.split()[0] alone, which collapsed
+# every git subcommand (and every pip/npm subcommand) into one grant key --
+# approving "git add file.py" once with SESSION scope silently covered
+# "git fetch", "git stash", "git tag", and "git commit" afterward too.
+# ============================================================================
+
+from jarvis.security.command_validator import grant_scope_for_command
+
+
+def test_grant_scope_distinguishes_different_subcommand_families():
+    assert grant_scope_for_command("git add file.py") != grant_scope_for_command("git fetch")
+    assert grant_scope_for_command("git add file.py") != grant_scope_for_command("git stash")
+    assert grant_scope_for_command("git add file.py") != grant_scope_for_command("git tag v1")
+    assert grant_scope_for_command("git add file.py") != grant_scope_for_command("git commit -m x")
+    assert grant_scope_for_command("pip install requests") != grant_scope_for_command("pip uninstall requests")
+    assert grant_scope_for_command("npm install left-pad") != grant_scope_for_command("npm uninstall -g left-pad")
+
+
+def test_grant_scope_still_shares_across_same_family_different_args():
+    # The convenience a SESSION grant exists for: repeating the SAME
+    # routine operation with different arguments should not re-prompt.
+    assert grant_scope_for_command("git add file.py") == grant_scope_for_command("git add other_file.py")
+    assert grant_scope_for_command("pip install requests") == grant_scope_for_command("pip install flask")
+    assert grant_scope_for_command("npm install left-pad") == grant_scope_for_command("npm install express")
+
+
+def test_grant_scope_falls_back_to_first_token_for_unrecognized_shape():
+    # Coarse, but harmless: an unrecognized shape is always DESTRUCTIVE and
+    # DESTRUCTIVE is never grant-covered regardless of what the key is.
+    assert grant_scope_for_command("some_unknown_binary --flag") == "some_unknown_binary"
