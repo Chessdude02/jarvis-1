@@ -133,3 +133,23 @@ def test_deobfuscation_does_not_break_existing_backslash_dependent_deny_pattern(
     assert deny_list.denied_command(
         "New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft' -Name Foo"
     ) is not None
+
+
+# -- Cyrillic/Greek homoglyph evasion of attack-tool patterns ---------------
+# bash/cmd.exe resolve a binary name by its exact byte sequence -- a
+# homoglyph-spelled name like "nmар" (Cyrillic а/р, everything else ASCII)
+# is a DIFFERENT string to \bnmap\b even though it renders identically in
+# most fonts. Found by testing: this evaded ATTACK_TOOL_PATTERNS entirely
+# before the homoglyph-folding table was added to
+# _deobfuscate_for_attack_tool_matching.
+
+def test_cyrillic_homoglyph_attack_tool_name_denied():
+    assert deny_list.denied_command("nmар -sV 192.168.1.0/24") is not None  # Cyrillic а, р
+    assert deny_list.denied_command("hydrа -l admin -P wordlist.txt ssh://target") is not None  # Cyrillic а
+    assert deny_list.denied_command("mimikаtz") is not None  # Cyrillic а
+    assert classify_command("nmар -sV 192.168.1.0/24").denied is True
+
+
+def test_homoglyph_folding_does_not_affect_ordinary_commands():
+    for cmd in ("git status", "pip install requests", "cat README.md", "npm install express"):
+        assert deny_list.denied_command(cmd) is None

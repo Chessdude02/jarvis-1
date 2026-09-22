@@ -171,8 +171,25 @@ def normalize_command(command: str) -> str:
 # regress those checks instead of strengthening them.
 _QUOTE_AND_BACKSLASH = re.compile(r"['\"\\]")
 
+# The classic homoglyph set used to typosquat/spoof ASCII text: Cyrillic,
+# Greek, and Armenian letters that render visually identical (or near-
+# identical) to a Latin letter in most fonts, mapped to that Latin letter.
+# Found by testing: "nmар -sV target" (Cyrillic а U+0430 and р U+0440,
+# everything else ASCII) evaded \bnmap\b entirely -- the string just isn't
+# "nmap" at the codepoint level -- degrading the deny to a plain
+# "unknown command shape" DESTRUCTIVE, same as the quote/backslash gap.
+# Deliberately a small, curated table of the letters actually used in
+# real-world confusable attacks, not a full Unicode confusables database.
+_HOMOGLYPH_TO_LATIN = str.maketrans({
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y",  # Cyrillic
+    "і": "i", "ѕ": "s", "ј": "j", "һ": "h", "ԁ": "d", "ո": "n", "ѡ": "w",
+    "А": "A", "Е": "E", "О": "O", "Р": "P", "С": "C", "Х": "X", "У": "Y",
+    "Ι": "I", "Κ": "K", "Ο": "O", "Ρ": "P", "Τ": "T", "Χ": "X",  # Greek
+})
+
 
 def _deobfuscate_for_attack_tool_matching(command: str) -> str:
+    command = command.translate(_HOMOGLYPH_TO_LATIN)
     return _QUOTE_AND_BACKSLASH.sub("", command)
 
 
