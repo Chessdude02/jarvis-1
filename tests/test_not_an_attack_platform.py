@@ -192,6 +192,48 @@ def test_phrase_keep_making_requests_until_the_server_responds(settings, registr
 
 
 # ============================================================================
+# open_application must not be a second, unguarded way to run an attack
+# tool or an arbitrary file, bypassing execute_command's review entirely.
+# ============================================================================
+# Found by testing: OpenApplicationTool's execute() resolves app_name via
+# shutil.which() (which resolves an absolute/relative path directly, not
+# just a PATH-only lookup) and launches it -- but the tool's original
+# build_request() never populated request.command or request.paths, so
+# NOTHING about app_name was visible to the policy engine. Confirmed
+# against the real PolicyEngine before the fix: app_name="nmap"/"hydra"/
+# "mimikatz" and an arbitrary planted script's absolute path all evaluated
+# to ALLOW under this SAFE-category (auto-allow, no confirmation) tool.
+
+def test_open_application_denies_known_attack_tool_names(policy_engine):
+    for app in ("nmap", "masscan", "hydra", "sqlmap", "mimikatz", "hashcat"):
+        req = _open_application_request(app)
+        decision = policy_engine.evaluate(req)
+        assert decision.decision == Decision.DENY, f"open_application should deny launching {app!r}"
+
+
+def test_open_application_denies_path_shaped_app_name(policy_engine, tmp_path):
+    script = tmp_path / "evil.sh"
+    script.write_text("#!/bin/sh\necho PWNED\n")
+    script.chmod(0o755)
+    for app in (str(script), "./relative/evil", "C:\\Users\\Public\\evil.exe", "/usr/bin/id"):
+        req = _open_application_request(app)
+        decision = policy_engine.evaluate(req)
+        assert decision.decision == Decision.DENY, f"open_application should refuse a path-shaped app_name: {app!r}"
+
+
+def test_open_application_still_allows_ordinary_named_apps(policy_engine):
+    for app in ("notepad", "code", "chrome", "spotify"):
+        req = _open_application_request(app)
+        decision = policy_engine.evaluate(req)
+        assert decision.decision == Decision.ALLOW, f"open_application should still auto-allow launching {app!r} by name"
+
+
+def _open_application_request(app_name) -> ActionRequest:
+    from jarvis.tools.safe_action_tools import OpenApplicationTool
+    return OpenApplicationTool().build_request({"app_name": app_name})
+
+
+# ============================================================================
 # Positive tests: security must not make JARVIS useless for real work.
 # ============================================================================
 

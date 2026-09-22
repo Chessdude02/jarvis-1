@@ -84,6 +84,39 @@ class OpenApplicationTool(Tool):
     description = "Launch an application by name (must already be resolvable on PATH, e.g. 'code', 'notepad')."
     parameters = {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}
 
+    def build_request(self, args):
+        # Found by testing: without this override, the base build_request()
+        # (see Tool.build_request's own docstring warning) leaves both
+        # request.command and request.paths empty for this tool, which means
+        # NOTHING here is visible to the policy engine's deny-list checks --
+        # SAFE auto-allows unconditionally, with no path or command for
+        # step 1c/1d to inspect. Confirmed against the real PolicyEngine:
+        # app_name="nmap"/"hydra"/"mimikatz"/"netcat" all evaluated to ALLOW.
+        # shutil.which() resolves an absolute/relative path directly (not
+        # just a bare PATH lookup), so app_name could also point at an
+        # arbitrary executable already on disk -- e.g. one execute_command
+        # was separately approved to write earlier in the same session,
+        # letting this tool run it a second time with zero further scrutiny.
+        #
+        # Setting request.command runs app_name through the same
+        # ATTACK_TOOL_PATTERNS / DENY_COMMAND_PATTERNS check execute_command
+        # gets (step 1d in policy_engine._evaluate, which runs independently
+        # of is_command_tool/category resolution) -- an outright DENY for a
+        # known attack tool or security-control name, while an ordinary app
+        # ("notepad", "code", "chrome") still resolves to this tool's SAFE
+        # base_category as before, since is_command_tool stays False and
+        # classify_command() is never invoked. Setting request.paths to the
+        # resolved location (when shutil.which succeeds) additionally runs
+        # it through the credential/system-root path checks (step 1c).
+        req = super().build_request(args)
+        app_name = args.get("app_name", "")
+        req.command = app_name if isinstance(app_name, str) and app_name else None
+        if req.command:
+            resolved = shutil.which(req.command)
+            if resolved:
+                req.paths = [resolved]
+        return req
+
     def execute(self, args, context: ToolContext) -> ToolResult:
         app_name = args["app_name"]
         resolved = shutil.which(app_name)

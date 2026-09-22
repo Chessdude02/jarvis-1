@@ -224,7 +224,27 @@ class PolicyEngine:
             if reason:
                 return _deny(reason)
 
-        # 1d. Absolute deny list: command patterns (independent of category).
+        # 1d. open_application is documented (and, per its policy category,
+        # trusted) to launch a bare, already-installed application by name --
+        # "code", "notepad" -- not an arbitrary file. Found by testing: its
+        # own build_request() resolves app_name with shutil.which(), which
+        # (confirmed) resolves an absolute/relative path directly, not just
+        # a PATH-only lookup. A path-shaped app_name is a different, riskier
+        # operation than what this tool's SAFE base category was designed
+        # for -- e.g. a script written to disk by an earlier, separately
+        # approved execute_command call, launched a second time with zero
+        # further review. Denied outright rather than gated as MODIFY/
+        # DESTRUCTIVE: the tool's own contract is "by name", so a path here
+        # is being used to say something other than what it claims.
+        if request.tool_name == "open_application" and request.command:
+            if any(sep in request.command for sep in ("/", "\\")):
+                return _deny(
+                    "open_application only launches an installed application by bare name (e.g. 'code', "
+                    "'notepad'), not a file path. Use execute_command to run a specific file -- it will "
+                    "go through full command review instead of this tool's auto-allow path."
+                )
+
+        # 1e. Absolute deny list: command patterns (independent of category).
         if request.command:
             reason = deny_list.denied_command(request.command)
             if reason:
