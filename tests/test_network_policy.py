@@ -50,6 +50,24 @@ def test_unspecified_address_blocked():
     assert _blocked("http://0.0.0.0/")
 
 
+def test_cgnat_shared_address_space_blocked():
+    # 100.64.0.0/10 (RFC 6598) -- Python's ipaddress.is_private is False for
+    # this range (a known upstream gap), but it's non-internet-routable and
+    # used internally by ISPs/cloud providers; the Alibaba metadata host
+    # (100.100.100.200, special-cased separately below) sits inside it.
+    # Found by testing: this range sailed through before the is_global
+    # catch-all was added.
+    assert _blocked("http://100.64.0.1/")
+    assert _blocked("http://100.100.100.100/")
+    assert _blocked("http://100.127.255.255/")
+
+
+def test_ietf_benchmarking_and_documentation_ranges_blocked():
+    assert _blocked("http://198.18.0.1/")  # RFC 2544 benchmarking
+    assert _blocked("http://192.0.2.1/")  # TEST-NET-1 documentation
+    assert _blocked("http://203.0.113.1/")  # TEST-NET-3 documentation
+
+
 # -- cloud metadata endpoints -------------------------------------------------
 
 def test_aws_azure_gcp_metadata_ip_blocked():

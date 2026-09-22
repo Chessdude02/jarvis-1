@@ -87,6 +87,20 @@ def _is_blocked_ip(ip_str: str) -> str | None:
         return f"{ip_str} is the unspecified address"
     if str(ip) in _BLOCKED_METADATA_HOSTS:
         return f"{ip_str} is a known cloud metadata endpoint"
+    if not ip.is_global:
+        # Catch-all for special-purpose ranges the named checks above don't
+        # cover -- notably 100.64.0.0/10 (RFC 6598 "shared address space" /
+        # CGNAT), which Python's ipaddress module does NOT mark is_private
+        # despite it being non-internet-routable and used internally by ISPs
+        # and cloud providers (the Alibaba metadata host above, 100.100.100.200,
+        # sits inside this exact range -- found by testing: that one host was
+        # special-cased while the /10 it lives in was not). Also catches
+        # IETF-reserved benchmarking (198.18.0.0/15) and documentation
+        # (192.0.2.0/24, 203.0.113.5, etc.) ranges the same way. is_global is
+        # True for ordinary public addresses like 8.8.8.8, so this only
+        # rejects ranges that were never meant to be reachable over the
+        # public internet in the first place.
+        return f"{ip_str} is not a globally routable address (special-purpose range, e.g. CGNAT/benchmarking/documentation)"
     return None
 
 
