@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-desktop-assistant"
+version = "0.1.0"
+description = "A local-first, offline desktop assistant for Windows, backed by a local LLM via Ollama, gated by a deterministic policy engine the LLM cannot see or influence."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7,<7",
+    "psutil>=5.9,<6",
+    "PyYAML>=6.0,<7",
+    "requests>=2.31,<3",
+    "keyboard>=0.13,<0.14 ; sys_platform == 'win32'",
+    "pywin32>=306 ; sys_platform == 'win32'",
+]
+
+[project.scripts]
+jarvis = "jarvis.ui.app:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0,<9",
+    "pytest-timeout>=2.3,<3",
+]
+
+[tool.setuptools.packages.find]
+include = ["jarvis*"]
+
+[tool.setuptools.package-data]
+jarvis = ["config/default_config.yaml"]
